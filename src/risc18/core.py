@@ -72,9 +72,13 @@ Control: HALT (``SYSTEM`` with ``imm6 == SYS_HALT``) is decoded in D, freezes
 down the pipe, retires through W exactly like golden counts it, and sets
 ``o_halt`` sticky.  Nothing retires after it.
 
-MUL is a single-cycle combinational 18x18 multiply masked to 18 bits; it
-already maps to one MULT18X18D, so M8 owns operand edge cases and result
-handling rather than cell inference.
+MUL is a single-cycle combinational 18x18 multiply masked to 18 bits, now an
+explicit unit (:class:`risc18.mul.Multiplier`, ``registered=False``): the
+product is available in X, so MUL retires at CPI 1.0 and the X-stage forward
+path covers it like any other ALU result.  The unit's ``registered=True`` mode
+(one edge of latency, the DSP's own output register) needs a one-cycle X hold
+and was measured against this baseline in M8; the core keeps the
+zero-bubble form.
 
 Reset: the core owns the ``sync`` domain it drives (``i_rst`` is wired to that
 domain's ``rst``), so every unit elaborated underneath -- ``PCUnit``,
@@ -101,6 +105,7 @@ from .branch import BranchUnit
 from .decoder import Decoder
 from .dmem import DataMemory
 from .imem import Fetch
+from .mul import Multiplier
 from .pc import BranchTarget
 from .regfile import RegFile
 
@@ -143,6 +148,7 @@ class Core(Elaboratable):
         m.submodules.decoder = decoder = Decoder()
         m.submodules.regfile = regfile = RegFile()
         m.submodules.alu = alu = ALU()
+        m.submodules.mul = mul = Multiplier(registered=False)
         m.submodules.branch = branch = BranchUnit()
         m.submodules.target = target = BranchTarget()
         m.submodules.dmem = dmem = DataMemory(self.data)
@@ -377,14 +383,17 @@ class Core(Elaboratable):
             alu.i_a.eq(dx_a),
             alu.i_b.eq(dx_b),
             alu.i_op.eq(dx_alu_op),
+            mul.i_a.eq(dx_a),
+            mul.i_b.eq(dx_b),
         ]
 
         # X-stage result mux: the value the writeback path carries and the
         # value D forwards from (M7).  Driven here, declared above.
         with m.If(dx_mul):
-            # Single-cycle 18x18 product, low 18 bits: signedness of the
-            # operands does not affect the low bits of the product.
-            m.d.comb += x_value.eq((dx_a * dx_b)[:isa.WIDTH])
+            # Single-cycle 18x18 product, low 18 bits from the explicit
+            # multiplier unit (M8): signedness of the operands does not affect
+            # the low bits of the product.
+            m.d.comb += x_value.eq(mul.o_y)
         with m.Elif(dx_link):
             # JAL/JALR link: pc + 1, the instruction after the jump.
             m.d.comb += x_value.eq(dx_pc + 1)
