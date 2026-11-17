@@ -161,6 +161,15 @@ class PCUnit(Elaboratable):
     i_redirect: Signal(1); i_target: Signal(16); i_hold: Signal(1)
     o_pc: Signal(16)
     # redirect > hold > increment; wraps at 2^16; sync reset clears to 0
+
+class Fetch(Elaboratable):
+    Fetch(init=[...])             # words loaded into the instruction EBR
+    i_redirect: Signal(1); i_target: Signal(16); i_hold: Signal(1)
+    o_pc: Signal(16)              # PC register (address being fetched)
+    o_instr: Signal(18)           # EBR output for o_instr_pc
+    o_instr_pc: Signal(16)        # PC that produced o_instr
+    # PCUnit drives InstrMemory; i_hold freezes both; an instruction appears
+    # two clock edges after its PC becomes current
 ```
 
 ## 6. Core (M5 onward)
