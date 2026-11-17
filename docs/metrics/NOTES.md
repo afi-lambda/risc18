@@ -109,3 +109,45 @@ drop is ~2.4 MHz and any
 * CPI: load-use pair 1.167 (one bubble); 10 back-to-back loads 1.000; distance-2
   dependencies 0 bubbles (M bypass); distance-1 ALU dependencies still 1 bubble,
   which is M7's to remove.
+
+## M7 X-stage forwarding
+
+* `CoreTop` at M7: 2166 LUT4, 584 FF, 2 DP16KD, 1 DSP. fmax over seeds
+  {1,2,3,7} = 48.81 / 47.68 / 47.24 / 45.96 MHz (mean 47.42), against M6's
+  48.56 / 51.28 / 52.19 / 51.54 over the same seeds (mean 50.89): a ~3.5 MHz
+  mean drop and the ranges overlap only at their extremes, so treat it as a
+  small structural cost plus placement noise, and always quote the sweep.
+  (Dropping the redundant `rd != 0` compares from the hit terms recovered
+  ~2 MHz and ~100 LUT4 relative to the first M7 cut.)
+* The LUT growth is mostly the select: a single-line ablation (`x_hit1/2 := 0`,
+  functionally invalid, measurement only) removed 145 LUT4 and 79 PFUMX from
+  the first cut, whose remaining growth was the narrowed stall plus ABC/netlist
+  reshuffling. FF, EBR and DSP counts are unchanged; CCU2C goes 63 -> 62.
+* CPI: a 20-instruction distance-1 ADDI chain (not in the suite) went 1.90
+  (M6) -> 1.00 (M7); the 8-instruction program of
+  tests/test_core.py::test_distance_one_alu_chain_is_gapless went 1.75 -> 1.00;
+  a
+  load-use chain stays at exactly one bubble per load; the `CORE_TOP_PROGRAM`
+  image 1.62 -> 1.31; the five-iteration store/load loop of
+  tests/test_core.py::test_memory_accumulation_loop 1.51 -> 1.37; independent
+  loads remain 1.00.
+* A JAL/JALR link value is never consumed at distance 1 by construction: the
+  jump resolves in D and empties the two younger fetch slots, so the
+  interesting case is the word after the target, which costs nothing.
+
+## What M9 must actually do
+
+Timing closure is **not** achievable by placement effort on the current D-stage
+structure. Nine PnR runs put the best total path at 19.16 ns (M6 seed 3) and
+20.5 ns (best M7, seed 1, 48.81 MHz) against the 16.67 ns budget of 60 MHz.
+Per-seed M7 splits are 9.2/11.3, 7.9/13.1, 8.8/12.4 and 4.4/17.3 ns of
+logic/routing; seed 7 is routing-bound (17.3 ns of routing alone, under 58 MHz
+with zero logic) while seeds 1-3 route in 11.3-13.1 ns, so the miss is a mix of
+logic depth and placement. A measurement-only ablation that deletes the X select
+measures 48.47 / 53.29 / 54.20 MHz on seeds 1/3/7 at this head (50.93 MHz on the
+superseded first cut), i.e. still ~6 MHz short at best. M9 therefore needs a
+microarchitectural change,
+in order of expected value: move the branch compare/resolve out of D (it is
+the largest single block on the path: 18-bit CCU2C chain -> redirect -> FD
+capture mux), register the operand-select inputs, or add the fifth stage the
+design brief suggests. Use 19.1-23.6 ns as the observed starting range.

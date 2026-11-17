@@ -20,6 +20,11 @@ M6 scope: ``LD`` writes ``rd`` from the data EBR, ``ST`` commits to it, the
 pipeline is F/D/X/M/W, and a consumer one instruction behind a load costs
 exactly one bubble (``test_load_use_interlock_costs_exactly_one_bubble``)
 while independent loads run at CPI 1.0.
+
+M7 scope: the X-stage result is forwarded into D (X > M > W), so distance-1
+dependencies of every result kind -- ALU, ADDI, SHIFT, MUL, LUI and the
+JAL/JALR link -- retire at exactly one instruction per cycle, and the only
+remaining stall is load-use (``dx_mem_read``), still exactly one bubble.
 """
 
 import random
@@ -897,17 +902,23 @@ def test_straight_line_retires_without_gratuitous_stalls():
     assert run.cycles == 20, f"{run.cycles} cycles: a stall slipped in"
 
 
-def test_dependent_chain_stalls_at_most_once_per_dependency():
-    """Each distance-1 RAW costs exactly one bubble, and no more."""
+def test_dependent_addi_chain_needs_no_bubble():
+    """A 12-word distance-1 ADDI chain retires in exactly 12 cycles.
+
+    M5 counted this chain at one bubble per dependency (12 + 10 cycles)
+    because only M and W were forwarded.  M7 forwards the X-stage result into
+    D, so the chain is gapless; the exact count is asserted, so a single
+    leftover stall fails here.
+    """
     chain = [addi(1, 0, 1)]
     for rd in range(2, 12):
         chain.append(addi(rd, rd - 1, 1))
     program = chain + [halt()]
     machine, run = assert_lockstep(program)
     dependencies = len(chain) - 1
+    assert dependencies == 10
     assert len(run.retires) == machine.retired == 12
-    # 12 instructions + one bubble per dependency (11 writes, 10 dependencies).
-    assert run.cycles == len(program) + dependencies, run.cycles
+    assert run.cycles == len(program), run.cycles
 
 
 # --- M6: load-use interlock and store behaviour -----------------------------
@@ -1163,6 +1174,261 @@ def test_load_feeds_control_transfer_resolution():
     assert run.writes() == machine.trace
 
 
+# --- M7: X-stage forwarding -------------------------------------------------
+
+def _chain_cycles(program, data=None):
+    """Assert lockstep and gapless retire for a straight-line chain."""
+    machine, run = assert_lockstep(program, data=data)
+    assert len(run.retires) == machine.retired == len(program)
+    assert run.cycles == len(program), (
+        f"{run.cycles} cycles for {len(program)} chained instructions")
+    return machine, run
+
+
+def test_three_in_flight_writers_of_one_register_use_the_newest():
+    """W, M and X all write r2; the consumer must see the X-stage value."""
+    program = [
+        addi(2, 0, 1),                 # retires while the next two are in flight
+        addi(2, 0, 2),
+        addi(2, 0, 3),
+        addi(4, 2, 0),                 # must read 3, not 2 and not 1
+        halt(),
+    ]
+    machine, run = assert_lockstep(program)
+    assert run.writes() == [(0, 2, 1), (1, 2, 2), (2, 2, 3), (3, 4, 3)]
+    assert run.cycles == len(program)
+
+
+def test_distance_one_alu_chain_is_gapless():
+    """add/sub/and/or chains, both operands distance 1, retire at CPI 1.0."""
+    program = [
+        addi(1, 0, 1),                 # 0
+        addi(2, 1, 1),                 # 1: distance 1
+        alu(isa.ALU_ADD, 3, 2, 2),     # 2: both operands distance 1
+        alu(isa.ALU_SUB, 4, 3, 1),     # 3: rs1 distance 1
+        alu(isa.ALU_AND, 5, 4, 3),     # 4
+        alu(isa.ALU_OR, 6, 5, 4),      # 5
+        addi(7, 6, 1),                 # 6
+        halt(),                        # 7
+    ]
+    machine, run = _chain_cycles(program)
+    assert [value for _, _, value in run.writes()][-1] == machine.trace[-1][2]
+    assert run.cycles / len(run.retires) == 1.0
+
+
+def test_distance_one_shift_chain_is_gapless():
+    """All four shift kinds chained back to back."""
+    program = [
+        addi(1, 0, 3),
+        shift(2, 1, isa.SHIFT_SLL, 2),
+        shift(3, 2, isa.SHIFT_SRL, 1),
+        shift(4, 3, isa.SHIFT_SRA, 1),
+        shift(5, 4, isa.SHIFT_ROR, 1),
+        shift(6, 5, isa.SHIFT_SLL, 0),
+        addi(7, 6, 1),
+        halt(),
+    ]
+    _chain_cycles(program)
+
+
+def test_distance_one_mul_chain_is_gapless():
+    """MUL products forwarded straight into the next multiply."""
+    program = [
+        addi(1, 0, 3),
+        mul(2, 1, 1),
+        mul(3, 2, 2),
+        mul(4, 3, 3),
+        mul(5, 4, 4),
+        addi(6, 5, 1),
+        halt(),
+    ]
+    machine, run = _chain_cycles(program)
+    got = {rd: value for _, rd, value in run.writes()}
+    assert got[5] == machine.trace[-2][2]
+    assert got[2] == 9 and got[3] == 81        # 3*3, 9*9
+
+
+def test_distance_one_lui_chain_is_gapless():
+    """The LUI immediate is forwarded like any other X result."""
+    program = [
+        lui(1, 0x155),                 # r1 = 0x15500
+        addi(2, 1, 0),                 # distance 1
+        lui(3, 0x00A),
+        alu(isa.ALU_ADD, 4, 3, 2),     # rs1 distance 1
+        addi(5, 4, 1),
+        halt(),
+    ]
+    machine, run = _chain_cycles(program)
+    got = {rd: value for _, rd, value in run.writes()}
+    assert got[1] == 0x15500 and got[2] == 0x15500
+    assert got[3] == 0x00A00
+
+
+def test_a_branch_takes_the_direction_of_the_forwarded_alu_result():
+    """BEQ/BLT right behind their producer see the X result, not a stale rs."""
+    # r3 = 0 - 3 = -3 on the X->D edge the branch reads r3; a stale r3 = 0
+    # would make BLT not taken and BGE taken.
+    program = [
+        addi(1, 0, 0),                 # 0
+        addi(2, 0, 3),                 # 1
+        alu(isa.ALU_SUB, 3, 1, 2),     # 2: r3 = -3 (0x3FFFD)
+        br(isa.OP_BLT, 3, 1, 2),       # 3: taken (distance 1) -> 6
+        addi(5, 0, 111),               # 4: squashed
+        addi(5, 0, 222),               # 5: squashed
+        br(isa.OP_BGE, 3, 1, 2),       # 6: not taken (-3 >= 0 false)
+        addi(6, 0, 6),                 # 7
+        br(isa.OP_BNE, 3, 3, 2),       # 8: not taken (r3 == r3)
+        addi(7, 0, 7),                 # 9: executes
+        halt(),                        # 10
+    ]
+    machine, run = assert_lockstep(program)
+    pcs = [pc for _, pc, _, _, _ in run.retires]
+    assert 4 not in pcs and 5 not in pcs, pcs
+    assert {6, 7, 9} <= set(pcs), pcs
+    got = {rd: value for _, rd, value in run.writes()}
+    assert got[3] == 0x3FFFD and got[7] == 7
+    # Exactly the two squash slots of the one taken branch, no dependency stall.
+    assert run.cycles == len(run.retires) + 2, run.cycles
+
+
+def test_a_store_commits_the_word_forwarded_from_the_alu():
+    """ST data (rs2) and ST base (rs1) both taken from the X stage."""
+    image = data_image()
+    program = [
+        addi(1, 0, 10),                # 0: base
+        addi(2, 0, 7),                 # 1
+        alu(isa.ALU_ADD, 3, 2, 2),     # 2: r3 = 14
+        st(3, 1, 0),                   # 3: mem[10] = r3, data distance 1
+        ld(4, 1, 0),                   # 4: read it back
+        halt(),                        # 5
+    ]
+    machine, run = _chain_cycles(program, data=image)
+    assert machine.mem[10] == 14
+    got = {rd: value for _, rd, value in run.writes()}
+    assert got[4] == 14
+
+    # Same for the address base: ST whose rs1 is the previous ALU result.
+    program = [
+        addi(1, 0, 4),                 # 0
+        addi(2, 0, 7),                 # 1
+        alu(isa.ALU_ADD, 3, 1, 1),     # 2: r3 = 8, the address
+        st(2, 3, 0),                   # 3: mem[8] = 7, base distance 1
+        ld(4, 1, 8),                   # 4: mem[12] = 7 read back via base+8
+        halt(),                        # 5
+    ]
+    machine, run = _chain_cycles(program, data=image)
+    assert machine.mem[8] == 7
+
+
+def test_a_jalr_jumps_through_the_forwarded_alu_base():
+    """JALR's rs1 comes from the immediately preceding ALU result."""
+    program = [
+        addi(1, 0, 0),                 # 0
+        addi(2, 0, 5),                 # 1
+        alu(isa.ALU_ADD, 3, 2, 1),     # 2: r3 = 5
+        jalr(4, 3, 2),                 # 3: -> 5 + 2 = 7, link 4
+        addi(8, 0, 1),                 # 4: squashed
+        addi(9, 0, 1),                 # 5: squashed
+        addi(10, 0, 1),                # 6: squashed
+        addi(7, 0, 7),                 # 7: the indirect target
+        halt(),                        # 8
+    ]
+    machine, run = assert_lockstep(program)
+    pcs = [pc for _, pc, _, _, _ in run.retires]
+    assert not {4, 5, 6} & set(pcs), pcs
+    assert 7 in pcs, pcs
+    got = {rd: value for _, rd, value in run.writes()}
+    assert got[4] == 4 and got[7] == 7      # link value and target both right
+    # Exactly the two squash slots of the jump, no dependency stall.
+    assert run.cycles == len(run.retires) + 2, run.cycles
+
+
+def test_a_jal_link_value_is_consumed_without_a_dependency_bubble():
+    """The instruction after a JAL's target reads the link value it wrote.
+
+    A taken jump empties the two younger fetch slots by construction (D-stage
+    resolution, unchanged since M5), so the link value's consumer can never be
+    *pipeline* distance 1; what M7 must guarantee is that the read costs no
+    extra cycle over the same program with an independent operand.  The link
+    value itself travels through the same ``x_value`` forward mux.
+    """
+    chained = [
+        jal(1, 0),                     # 0: -> 1, link = 1
+        nop(),                         # 1: squashed
+        addi(2, 1, 1),                 # 2: r2 = r1 + 1 = 2, reads the link
+        addi(3, 2, 1),                 # 3
+        halt(),                        # 4
+    ]
+    free = [
+        jal(1, 0),
+        nop(),
+        addi(2, 0, 1),                 # same shape, no dependency on r1
+        addi(3, 2, 1),
+        halt(),
+    ]
+    machine, chained_run = assert_lockstep(chained)
+    _, free_run = assert_lockstep(free)
+    got = {rd: value for _, rd, value in chained_run.writes()}
+    assert got[1] == 1 and got[2] == 2      # pc + 1, then consumed
+    assert chained_run.cycles == free_run.cycles, (
+        chained_run.cycles, free_run.cycles)
+    assert machine.trace == chained_run.writes()
+
+
+def test_a_load_use_still_costs_exactly_one_bubble():
+    """The narrowed interlock: a load's word is only there in M."""
+    image = data_image()
+    program = [addi(1, 0, 0), nop(), nop(), ld(2, 1, 0), addi(3, 2, 1),
+               halt()]
+    machine, run = assert_lockstep(program, data=image)
+    assert len(run.retires) == machine.retired == 6
+    assert run.cycles == len(program) + 1, run.cycles
+
+    # A store consuming the load one instruction behind stalls the same way.
+    program = [addi(1, 0, 0), nop(), nop(), ld(2, 1, 0), st(2, 1, 4), halt()]
+    machine, run = assert_lockstep(program, data=image)
+    assert run.cycles == len(program) + 1, run.cycles
+    assert machine.mem[4] == image[0]
+
+
+def test_a_load_consumed_at_distance_two_needs_no_bubble():
+    """Two instructions behind the load, the M bypass already covers it."""
+    image = data_image()
+    for gap in (1, 2):
+        program = [addi(1, 0, 0), nop(), nop(), ld(2, 1, 0)]
+        program += [nop()] * gap
+        program += [addi(3, 2, 1), halt()]
+        machine, run = assert_lockstep(program, data=image)
+        assert len(run.retires) == machine.retired == len(program)
+        assert run.cycles == len(program), (gap, run.cycles)
+        got = {rd: value for _, rd, value in run.writes()}
+        assert got[3] == (image[0] + 1) & isa.MASK
+
+
+def test_r0_is_never_forwarded_and_never_stalls():
+    """Writes to r0 are discarded, so r0 reads stay 0 at every distance."""
+    program = [
+        addi(5, 0, 7),                 # 0
+        addi(0, 5, 0),                 # 1: "writes" r0 (discarded)
+        addi(1, 0, 1),                 # 2: r0 read distance 1 -> 0, so r1 = 1
+        alu(isa.ALU_ADD, 2, 0, 0),     # 3: r2 = 0 + 0
+        halt(),                        # 4
+    ]
+    machine, run = _chain_cycles(program)
+    got = {rd: value for _, rd, value in run.writes()}
+    assert 0 not in got
+    assert got[1] == 1 and got[2] == 0
+
+    # A load into r0 neither forwards nor stalls its consumer.
+    image = data_image()
+    program = [addi(1, 0, 0), nop(), nop(), ld(0, 1, 0), addi(2, 0, 1),
+               halt()]
+    machine, run = _chain_cycles(program, data=image)
+    assert run.cycles == len(program)
+    got = {rd: value for _, rd, value in run.writes()}
+    assert 0 not in got and got[2] == 1
+
+
 # --- seeded random lockstep -------------------------------------------------
 
 def _random_program(rng, n, target_base):
@@ -1410,6 +1676,171 @@ def test_seeded_random_programs_with_loads_and_stores_lockstep():
     print(f"fuzz ld/st: {programs} programs, {total_instr} instructions, "
           f"{total_writes} compared writes, {total_loads} loads, "
           f"{total_stores} stores, {programs * READBACK_WORDS} compared words")
+
+
+# --- seeded random lockstep over long distance-1 chains (M7) ----------------
+
+CHAIN_READBACK = 32
+
+
+def _chained_program(rng, n):
+    """``n`` straight-line words built around long distance-1 RAW chains.
+
+    Word 0 sets r15 = 0 (the store base).  The body alternates between *chain
+    segments* of 24..48 words -- every one of them reading the register the
+    word directly in front wrote (rs1, and sometimes rs2) and writing a fresh
+    one, so the segment is one unbroken distance-1 dependency chain of
+    ALU/ADDI/SHIFT/MUL and LD results -- and *boundary* words: a store that
+    consumes the tail of the finished chain one instruction behind it (rs2,
+    distance 1, into the readable window 0..31) and a fresh chain root.  There
+    is no control flow, so the static order is the dynamic order and the cycle
+    count is predicted from the load-use pairs alone.
+    """
+    program = [addi(15, 0, 0)]
+    last_rd = None
+    chain_left = 0
+    for pc in range(1, n):
+        if last_rd is not None and (chain_left == 0
+                                    and rng.random() < 0.5):
+            # Boundary: store the finished chain's tail one instruction behind
+            # it (forwarded store data) into the readback window, then start a
+            # new chain on the next word.
+            program.append(st(last_rd, 15, rng.randrange(CHAIN_READBACK)))
+            continue
+        rd = rng.randrange(1, 15)               # never r0 or the base r15
+        if last_rd is None or chain_left == 0:
+            # Chain root: writes a register without reading one.
+            kind = rng.choice(["addi", "addi", "lui", "ld"])
+            if kind == "addi":
+                program.append(addi(rd, 0, rng.randrange(1, 32)))
+            elif kind == "lui":
+                program.append(lui(rd, rng.randrange(1024)))
+            else:
+                program.append(ld(rd, 15, rng.randrange(CHAIN_READBACK)))
+            last_rd = rd
+            chain_left = rng.randint(24, 48)
+            continue
+
+        # Chain member: reads the previous word's result at distance 1.
+        kind = rng.choices(
+            ["addi", "alu", "andi", "ori", "mul", "shift", "ld"],
+            weights=[30, 25, 7, 7, 10, 14, 7])[0]
+        if kind == "addi":
+            program.append(addi(rd, last_rd, rng.randrange(32)))
+        elif kind == "alu":
+            rs2 = last_rd if rng.random() < 0.5 else rng.randrange(15)
+            program.append(alu(rng.randrange(4), rd, last_rd, rs2))
+        elif kind == "andi":
+            program.append(andi(rd, last_rd, rng.randrange(64)))
+        elif kind == "ori":
+            program.append(ori(rd, last_rd, rng.randrange(64)))
+        elif kind == "mul":
+            rs2 = last_rd if rng.random() < 0.5 else rng.randrange(15)
+            program.append(mul(rd, last_rd, rs2))
+        elif kind == "shift":
+            program.append(shift(rd, last_rd, rng.randrange(4),
+                                 rng.randrange(16)))
+        else:
+            program.append(ld(rd, last_rd, rng.randrange(32)))
+        last_rd = rd
+        chain_left -= 1
+
+    # Straight-line readback of the store window: the retire values of these
+    # loads are the RTL's view of words 0..31, so a store that committed the
+    # wrong data (or none at all) shows up as a memory mismatch.
+    readback_pc = len(program)
+    for k in range(CHAIN_READBACK):
+        program.append(ld(1 + (k % 14), 15, k))
+    program.append(halt())
+    return program, readback_pc
+
+
+def _load_use_bubbles(program):
+    """Adjacent pairs that must cost one bubble: a load, then its consumer."""
+    bubbles = 0
+    for i in range(len(program) - 1):
+        d = isa.decode(program[i])
+        if not d.mem_read or d.rd == 0:
+            continue
+        e = isa.decode(program[i + 1])
+        if (e.rs1_used and e.rs1 == d.rd) or (e.rs2_used and e.rs2 == d.rd):
+            bubbles += 1
+    return bubbles
+
+
+def _distance_one_edges(program):
+    """``[(pc, run_length)]`` for every word reading the previous word's rd."""
+    edges = []
+    run = 0
+    for pc in range(1, len(program) - 1):
+        prev = isa.decode(program[pc - 1])
+        cur = isa.decode(program[pc])
+        hit = prev.reg_write and prev.rd != 0 and (
+            (cur.rs1_used and cur.rs1 == prev.rd)
+            or (cur.rs2_used and cur.rs2 == prev.rd))
+        run = run + 1 if hit else 0
+        if hit:
+            edges.append((pc, run))
+    return edges
+
+
+def test_seeded_random_distance_one_chains_lockstep_and_stay_gapless():
+    """>= 20 random chain programs: lockstep and cycles <= N + load-use."""
+    rng = random.Random(0xC4A1)
+    image = data_image(mix=0x2B)
+    programs = 0
+    attempts = 0
+    total_instr = 0
+    total_edges = 0
+    total_bubbles = 0
+    longest_chain = 0
+    while programs < 25 and attempts < 60:
+        attempts += 1
+        n = rng.randint(40, 80)
+        program, readback_pc = _chained_program(rng, n)
+
+        machine = golden_machine(program, image, cap=8000)
+        assert machine.halted, "the chain body has no control flow"
+        assert machine.retired == len(program)
+
+        edges = _distance_one_edges(program)
+        bubbles = _load_use_bubbles(program)
+        run = run_core(program, max_cycles=10 * len(program) + 300,
+                       data=image)
+        assert run.halted, f"RTL did not halt for chain program {programs}"
+        assert run.writes() == machine.trace, (
+            f"chain program {programs} (n={n}): "
+            + _diff(run.writes(), machine.trace))
+        assert len(run.retires) == machine.retired == len(program)
+
+        # The whole point of M7: no dependency bubble that is not load-use.
+        assert run.cycles <= len(program) + bubbles, (
+            f"chain program {programs}: {run.cycles} cycles for "
+            f"{len(program)} instructions with {bubbles} load-use bubbles")
+
+        readback = [value for _, pc, we, rd, value in run.retires
+                    if readback_pc <= pc < readback_pc + CHAIN_READBACK
+                    and we and rd != 0]
+        assert len(readback) == CHAIN_READBACK, len(readback)
+        assert readback == machine.mem[:CHAIN_READBACK], (
+            f"chain program {programs}: "
+            + _first_mem_diff(readback, machine.mem[:CHAIN_READBACK]))
+
+        programs += 1
+        total_instr += machine.retired
+        total_edges += len(edges)
+        total_bubbles += bubbles
+        longest_chain = max([longest_chain]
+                            + [run_len for _, run_len in edges])
+
+    assert programs >= 25, f"only {programs} chain programs ran"
+    # The fuzz must actually contain long distance-1 chains, or it proves
+    # nothing about forwarding.
+    assert longest_chain >= 20, longest_chain
+    assert total_edges >= 500, total_edges
+    print(f"fuzz chains: {programs} programs, {total_instr} instructions, "
+          f"{total_edges} distance-1 edges (longest {longest_chain}), "
+          f"{total_bubbles} load-use bubbles")
 
 
 # --- measurement top --------------------------------------------------------

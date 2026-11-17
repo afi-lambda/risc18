@@ -206,23 +206,24 @@ rows match `golden.Machine.trace` for every program, loads included (M6).
 `o_halt` asserts when the HALT instruction retires; fetching is already frozen
 at that point and the PC holds its post-HALT value.
 
-Pipeline (M6+): F (PC register, instruction EBR, FD register), D (decode,
+Pipeline (M7+): F (PC register, instruction EBR, FD register), D (decode,
 combinational regfile read, branch/jump resolution, hazard check), X (ALU,
 multiply, link value, LD/ST effective address), M (data EBR, load word), W
 (register writeback). The data EBR is addressed during X, so a store commits on
 the X->M edge and a load's word is on the EBR output during M; D takes a
 register written in M through an M-stage bypass (the ALU result or the load
-word), so only a distance-1 producer stalls. The EBR output lags the PC
+word), so only a distance-1 load producer stalls. The EBR output lags the PC
 register by one edge and the FD register adds a second, so an instruction is
 decoded two edges after its PC became the fetch address; a taken branch or a
 jump therefore squashes the two fetch slots already in flight.
 
-Hazard policy by milestone: M5 no forwarding -- D stalls only when it needs a
-register that X writes, because the W-stage write is visible through the
-regfile's same-cycle write-through read (so distance-2 and distance-3
-dependencies cost nothing). M6 adds the load-use interlock for the data EBR;
-M7 adds X and W forwarding so back-to-back ALU dependencies stop stalling and
-only load-use costs one bubble.
+Hazard policy (M7+): D sees a register value in the same cycle through
+forwarding -- X stage first (its ALU/MUL/link/LUI result), then M (its result
+or load word), then the regfile's same-cycle write-through for W. Only a
+load-use dependency stalls: X is a load and D needs its destination, because
+the load word does not exist until M. That costs exactly one bubble;
+distance-1 ALU dependencies and every dependency at distance 2 or more cost
+nothing.
 
 LD/ST (M6): `LD rd, imm(rs1)` writes `mem[(rs1 + sign_ext(imm6)) & 0xFFFF]`,
 `ST rs2, imm(rs1)` writes the same address; addresses >= 0x400 read 0 and
