@@ -1076,7 +1076,7 @@ def test_reset_on_the_stores_x_cycle_does_not_commit_it():
     reference = run()
     store_retire = [r[0] for r in reference if r[1] == 29]
     assert len(store_retire) == 1, store_retire
-    commit = store_retire[0]           # last cycle a reset can still kill it
+    commit = store_retire[0]           # retire cycle: already in the array
 
     assert final_load(run(commit - 2)) == 1   # well before the commit
     assert final_load(run(commit - 1)) == 1   # on its X cycle: discarded

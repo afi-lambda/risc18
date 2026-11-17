@@ -89,7 +89,8 @@ Caveats that apply to every unit milestone (M0–M4):
   collided word, so either choice is functionally correct today.
 * `CoreTop` at M6: 2096 LUT4, 584 FF, **2** DP16KD (instruction + data), 1 DSP.
   fmax over seeds {1,2,3,7} = 48.56 / 51.28 / 52.19 / 51.54 MHz (mean ~50.9),
-  against M5's 48.5-55.7 over the same seeds: the mean drop is ~4 MHz and any
+  against M5's 48.5-55.7 over the same seeds (means 50.89 vs 53.34): the mean
+drop is ~2.4 MHz and any
   single-seed delta (the M6 PR quoted 49.12 vs 53.89) sits inside the ~7 MHz
   placement spread, so quote the sweep, not one seed. The worst path is still
   the D stage, now with the M-stage bypass *select chain* (`xm_we`/`xm_rd`/
