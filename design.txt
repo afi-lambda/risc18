@@ -1,0 +1,496 @@
+# 18-bit RISC for Lattice ECP5
+
+I would design this as a small, pipelined, Harvard RISC processor, optimized for the ECP5-25F.
+
+The main objectives should be:
+
+1. Maximum clock frequency.
+2. Minimum LUT consumption.
+3. One EBR for instruction memory and one EBR for data memory initially.
+4. DSP-based arithmetic where it actually improves performance or resource consumption.
+5. Simple control logic, suitable for implementation in Amaranth.
+6. Expandable memory without changing the CPU architecture.
+
+There is one important architectural decision: **optimize the memory pipeline and register file before optimizing the ALU.** On a small FPGA processor, memory access and register-file implementation can easily become the critical path.
+
+## 1. Proposed architecture
+
+I suggest the following:
+
+| Component | Configuration |
+|---|---|
+| Data width | 18 bits |
+| Instruction width | 18 bits |
+| Address width | 16 bits initially |
+| Registers | 16 × 18 bits |
+| PC | 16 bits |
+| Instruction memory | EBR, synchronous |
+| Data memory | EBR, synchronous |
+| ALU | DSP-assisted |
+| Pipeline | 3 stages |
+| Architecture | Harvard |
+| Branch prediction | None |
+| Interrupts | Optional later |
+
+Architecture:
+
+```text
+                 +------------------+
+                 | Instruction EBR  |
+                 |   18-bit words   |
+                 +--------+---------+
+                          |
+                    Instruction
+                    output register
+                          |
+                          v
+                 +------------------+
+                 |    Decode        |
+                 |                  |
+                 | Register file    |
+                 +--------+---------+
+                          |
+                     Operand A/B
+                          |
+                          v
+                 +------------------+
+                 |       ALU        |
+                 |                  |
+                 | DSP / Logic      |
+                 +--------+---------+
+                          |
+                          v
+                 +------------------+
+                 |   Writeback      |
+                 +--------+---------+
+                          |
+                          v
+                 +------------------+
+                 | Register file    |
+                 +------------------+
+
+                 +------------------+
+                 |   Data EBR       |
+                 |   18-bit words   |
+                 +------------------+
+```
+
+I would use three pipeline stages:
+
+- **F:** Instruction fetch.
+- **X:** Decode, register read, execute.
+- **W:** Memory access and register writeback.
+
+However, synchronous EBR access requires careful treatment. I would register the memory address and pipeline control signals explicitly rather than assuming asynchronous memory reads.
+
+## 2. Instruction set
+
+Your instruction encoding is interesting: it keeps the instruction width at 18 bits while providing 16 registers.
+
+I would retain it, with a few conventions.
+
+### Register file
+
+```text
+R0  = constant zero
+R1-R15 = general-purpose registers
+```
+
+This is slightly more useful than having all 16 registers writable.
+
+Register file:
+
+- 16 × 18 bits.
+- Two asynchronous read ports.
+- One synchronous write port.
+- Writes to R0 ignored.
+- No register-file EBR.
+
+I would initially implement it using flip-flops and multiplexers. At only 288 bits, this is small, and it avoids introducing synchronous read latency into the execution pipeline.
+
+### Suggested opcode allocation
+
+You have 16 primary opcodes. I would use:
+
+| Opcode | Instruction | Format | Description |
+|---|---|---|---|
+| 0x0 | ALU | R | ADD, SUB, AND, OR |
+| 0x1 | ADDI | I | Add immediate |
+| 0x2 | ANDI | I | AND immediate |
+| 0x3 | ORI | I | OR immediate |
+| 0x4 | LD | I | Load 18-bit word |
+| 0x5 | ST | S | Store 18-bit word |
+| 0x6 | BEQ | B | Branch if equal |
+| 0x7 | BNE | B | Branch if not equal |
+| 0x8 | BLT | B | Signed less than |
+| 0x9 | BGE | B | Signed greater/equal |
+| 0xA | JAL | J | Jump and link |
+| 0xB | JALR | I | Indirect jump and link |
+| 0xC | LUI | U | Load upper immediate |
+| 0xD | MUL | R | Multiply |
+| 0xE | SHIFT | I | Logical/arithmetic shifts |
+| 0xF | SYSTEM | I | HALT, NOP, etc. |
+
+For the R-format ALU instruction:
+
+| fn | Operation |
+|---|---|
+| 00 | ADD |
+| 01 | SUB |
+| 10 | AND |
+| 11 | OR |
+
+XOR could be added later through another opcode or an extension.
+
+### Immediate conventions
+
+I recommend:
+
+- I: signed 6-bit immediate.
+- S: signed 6-bit immediate.
+- B: signed 6-bit PC-relative word offset.
+- U: 10-bit immediate shifted left by 8.
+- J: signed 10-bit PC-relative word offset.
+
+The architecture should initially use **word-addressed memory**. This makes the memory interface particularly simple.
+
+For branches:
+
+```text
+PC_next = PC + 1 + sign_extend(imm6)
+```
+
+For JAL:
+
+```text
+rd = PC + 1
+PC_next = PC + 1 + sign_extend(imm10)
+```
+
+One important detail: your S and B formats have identical bit layouts. That is perfectly fine; the opcode determines their interpretation.
+
+## 3. Memory architecture
+
+This is where I would spend most of the optimization effort.
+
+The ECP5 has embedded block RAM with synchronous read access. The LFE5U-25 has 56 × 18 Kbit sysMEM blocks, giving approximately 1 Mbit of embedded memory. [FPGA.io](https://fpga.io/fpga-device/lfe5u-25f-7mg285i/?utm_source=chatgpt.com)
+
+An 18-bit-wide memory can be configured as:
+
+```text
+1 EBR = 1024 × 18 bits
+```
+
+Initial configuration:
+
+| Memory | Width | Depth | EBR |
+|---|---:|---:|---:|
+| Instructions | 18 | 1024 | 1 |
+| Data | 18 | 1024 | 1 |
+
+This is a good starting point.
+
+### Instruction memory
+
+Use the EBR's registered output.
+
+```text
+                 +----------------+
+PC ------------->| Address        |
+                 |                |
+                 | Instruction    |
+                 | EBR            |
+                 |                |
+                 | Registered Q   |
+                 +-------+--------+
+                         |
+                         v
+                     Instruction
+```
+
+The PC should be registered, and the instruction output should feed the decode stage directly.
+
+Avoid adding unnecessary external registers around the EBR output.
+
+### Data memory
+
+Use a similar configuration:
+
+```text
+             +------------------+
+Address ---->|                  |
+Write data ->|    Data EBR      |
+Write enable>|                  |
+             | Registered Q     |
+             +--------+---------+
+                      |
+                      v
+                  Load result
+```
+
+Use synchronous writes and registered reads.
+
+For stores, the memory address, data and write enable must be aligned with the corresponding instruction.
+
+The memory interface should eventually support:
+- EBR internal memory.
+- External SRAM/SDRAM.
+- Memory-mapped peripherals.
+
+The CPU should not need to know which implementation is behind the interface.
+
+## 4. Pipeline
+
+I would actually recommend **four stages**, rather than three, for the first implementation.
+
+```text
+       F           D           X           M/W
+  +---------+ +---------+ +---------+ +---------+
+  | Fetch   | | Decode  | | Execute | | Memory  |
+  |         | |         | |         | | Write   |
+  | PC      | | Regfile | | ALU     | | Back    |
+  | EBR     | | Read    | | Branch  | |         |
+  +---------+ +---------+ +---------+ +---------+
+       |           |           |           |
+       +-----------+-----------+-----------+
+                   Pipeline
+                  registers
+```
+
+**F — Fetch**
+- PC generation.
+- Instruction EBR access.
+- Instruction output register.
+
+**D — Decode**
+- Instruction decoding.
+- Register-file read.
+- Immediate generation.
+
+**X — Execute**
+- ALU.
+- Branch comparison.
+- Effective address calculation.
+- DSP operation.
+
+**M/W — Memory and writeback**
+- Data EBR access.
+- Load result.
+- Register writeback.
+
+The load instruction needs particular attention: because EBR reads are synchronous, its result is not immediately available in the execute stage.
+
+For a first version, I would implement a simple interlock:
+
+```text
+LD  R1, [R2]
+ADD R3, R1, R4
+```
+
+The second instruction waits until the load result is available.
+
+Later, forwarding can remove most of these stalls.
+
+For branches, initially flush the pipeline when a branch is taken. No branch predictor is necessary.
+
+## 5. DSP-based ALU
+
+This is an interesting part of the design.
+
+The ECP5 sysDSP blocks are more capable than simple multipliers. They include:
+
+- 18 × 18 multipliers.
+- Pre-adders/subtractors.
+- Add/subtract units.
+- 54-bit ALU/accumulator.
+- Internal pipeline registers.
+- Configurable operation modes.
+
+The LFE5U-25 has 28 18 × 18 multiplier resources, organized into seven DSP blocks. [latticesemi.com](https://www.latticesemi.com/-/media/LatticeSemi/Documents/ApplicationNotes/AD2/FPGA-TN-02205-1-3-ECP5-and-ECP5-5G-sysDSP-User-Guide.ashx?document_id=50469\&utm_source=chatgpt.com)
+
+I would investigate two implementations.
+
+### Option A: DSP arithmetic
+
+Use a DSP block for ADD/SUB and MUL.
+
+```text
+       Operand A (18)
+             |
+             v
+       +-----------+
+       |           |
+       |  sysDSP   |
+       |           |
+       | ADD/SUB   |
+       | MULT      |
+       |           |
+       +-----+-----+
+             |
+             v
+       Result (18)
+```
+
+Advantages:
+- Dedicated arithmetic hardware.
+- Internal registers.
+- Potentially excellent clock frequency.
+- Multiplication essentially comes for free in terms of additional DSP resources if the block is already allocated.
+
+Disadvantages:
+- More complicated configuration.
+- DSP resources are consumed.
+- Operand selection and operation control need careful design.
+
+### Option B: Hybrid ALU
+
+My preferred starting point:
+
+| Operation | Implementation |
+|---|---|
+| ADD | FPGA carry chain |
+| SUB | FPGA carry chain |
+| AND | LUT |
+| OR | LUT |
+| XOR | LUT |
+| Compare | Carry chain |
+| MUL | DSP |
+
+An 18-bit adder is small. The FPGA's dedicated carry-chain resources can implement it efficiently.
+
+Using a DSP for every simple arithmetic operation isn't necessarily faster or smaller.
+
+**My recommendation:** implement both versions of ADD/SUB and measure them. Keep the DSP multiplier.
+
+The official reference is the [ECP5 sysDSP User Guide](https://www.latticesemi.com/-/media/LatticeSemi/Documents/ApplicationNotes/AD2/FPGA-TN-02205-1-3-ECP5-and-ECP5-5G-sysDSP-User-Guide.ashx?document_id=50469&utm_source=chatgpt.com).
+
+## 6. Pipeline hazards
+
+For maximum performance, I would eventually implement:
+
+- Register forwarding.
+- Load-use interlock.
+- Branch pipeline flush.
+- Single-cycle arithmetic instructions.
+- Multi-cycle multiplication if necessary.
+
+For example:
+
+```text
+ADD R1, R2, R3
+SUB R4, R1, R5
+```
+
+Forward the ADD result directly to the SUB operand input.
+
+No need to wait for register-file writeback.
+
+For multiplication, I would initially allow one or two cycles. There is no need to complicate the entire processor to make multiplication single-cycle.
+
+## 7. Resource optimization
+
+My initial resource budget would be:
+
+| Resource | Estimated requirement |
+|---|---:|
+| Instruction EBR | 1 |
+| Data EBR | 1 |
+| Register file | 288 FF bits |
+| PC | 16 FF bits |
+| Pipeline registers | ~150–250 FF bits |
+| DSP blocks | 1 |
+| Control | Small |
+| ALU | Small |
+
+These are architectural estimates, not synthesis results.
+
+The important point is that this processor should be very small relative to the ECP5-25F.
+
+I would avoid:
+- Microcoded control.
+- Complex forwarding networks initially.
+- Register-file EBR.
+- Large barrel shifters unless needed.
+- Cache.
+- Branch prediction.
+- Unnecessary architectural state.
+
+## 8. Development strategy
+
+I would implement this using your usual Specification → Tests → Implementation approach.
+
+Keep each milestone independently testable.
+
+| Milestone | Implementation | Validation |
+|---|---|---|
+| M0 | Instruction decoder | Decode all formats |
+| M1 | Register file | Read/write, R0 |
+| M2 | ALU | Arithmetic and logical tests |
+| M3 | PC and branches | Branch tests |
+| M4 | Instruction EBR | Fetch program |
+| M5 | CPU without data memory | Arithmetic programs |
+| M6 | Data EBR | LD/ST |
+| M7 | Pipeline | Forwarding and hazards |
+| M8 | DSP multiplier | Multiply tests |
+| M9 | Optimization | Timing and resource analysis |
+
+For each milestone:
+
+1. Write functional requirements.
+2. Write Amaranth simulation tests.
+3. Implement.
+4. Run synthesis.
+5. Record LUT, FF, EBR, DSP and maximum frequency.
+
+Use actual post-place-and-route timing, not just synthesis estimates.
+
+---
+
+# 9. One architectural improvement I would consider
+
+Your 18-bit instruction format has an interesting limitation: only six immediate bits for I-type instructions.
+
+That is perfectly reasonable for a compact RISC, but it makes address generation and constant loading relatively expensive.
+
+I would keep the instruction encoding for now, but consider adding:
+
+- `LD/ST`: base register + signed 6-bit offset.
+- `LUI`: upper 10 bits.
+- `ADDI`: signed 6-bit.
+- `JAL`: signed 10-bit relative offset.
+
+This gives a reasonably complete instruction set without introducing complicated encoding.
+
+---
+
+# 10. My recommended final configuration
+
+For the first CPU implementation:
+
+| Parameter | Choice |
+|---|---|
+| Architecture | 18-bit RISC |
+| Registers | 16 × 18 |
+| Address | 16-bit word address |
+| Instructions | Fixed 18-bit |
+| Instruction memory | 1 EBR |
+| Data memory | 1 EBR |
+| Pipeline | 5 stages: F/D/X/M/W |
+| ALU | Carry-chain + LUT |
+| Multiplier | ECP5 DSP |
+| Branches | Static, flush when taken |
+| Register forwarding | Yes, after basic pipeline |
+| Load interlock | Yes |
+| Reset | Synchronous |
+| Interrupts | Future extension |
+
+**One important performance target:** aim for a simple implementation running at 60–100 MHz initially, then optimize towards higher frequencies based on actual timing reports. These are design targets, not guaranteed ECP5 performance figures.
+
+The most interesting experiment would be to compare:
+
+1. A 3-stage CPU with a simpler execution pipeline.
+2. A 5-stage CPU with better timing isolation.
+
+Measure both on the same ECP5-25F.
+
+I would start with the second architecture, but keep the pipeline registers and control logic simple enough that the CPU can later be reduced to three stages if the timing results justify it.

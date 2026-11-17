@@ -1,0 +1,57 @@
+# Milestones and gates
+
+One PR per milestone, base = latest `origin/main`. Every milestone must leave
+the repository green.
+
+## Global gate (controller-verified, never worker-reported)
+
+```
+.venv/bin/python -m pytest tests/ -q           # 100% pass, whole suite
+.venv/bin/python tools/synth.py --top <top> --name <mN_name>
+```
+
+The synth run must produce `build/metrics/<mN_name>.json` with non-zero
+utilization, and the milestone's `.md` summary is committed under
+`docs/metrics/`. Post-place-and-route numbers only (nextpnr), never yosys
+estimates alone.
+
+Rules:
+
+* Frozen files: `src/risc18/isa.py`, `src/risc18/golden.py`, `tools/asm.py`,
+  `docs/ISA.md`. Changes need controller approval in the PR body.
+* Every milestone adds tests; no milestone deletes or weakens existing tests.
+* No new dependency without controller approval.
+* New RTL is Amaranth, exercised in `amaranth.sim.Simulator`; tests never
+  merely mirror Python helpers.
+* Synth tops wrap unit I/O in registers so the measured path is meaningful,
+  and expose `.ports`. Inputs and outputs both registered: nextpnr only reports
+  fmax when an interior register-to-register path exists, and M4+ milestones
+  must show a non-empty fmax.
+
+## Milestones
+
+| M | Branch | Scope | Acceptance |
+|---|---|---|---|
+| M0 | `feat/m0-decoder` | `risc18.decoder.Decoder` + `isa` conformance tests | Every format decodes exactly like `isa.decode()`; fuzz over seeded random words; all fields of section 4 checked; metrics recorded |
+| M1 | `feat/m1-regfile` | `risc18.regfile.RegFile` | 16×18, 2 comb reads, sync write, r0 hardwired, write-through read verified, reset clears; metrics |
+| M2 | `feat/m2-alu` | `risc18.alu.ALU` + `risc18.branch.BranchUnit` | 8 ALU ops incl. all shifts, signed compares; boundary + random vectors vs golden; metrics |
+| M3 | `feat/m3-pc-branch` | `risc18.pc.PCUnit` (PC register + next-PC mux + redirect) | sequential, branch taken/not, JAL/JALR targets, 16-bit wrap; metrics |
+| M4 | `feat/m4-imem` | `risc18.imem.InstrMemory` + fetch stage | 1-cycle registered read, enable freeze, preloaded program fetched in order, redirect next cycle; metrics |
+| M5 | `feat/m5-core` | 5-stage `risc18.core.Core` without data memory (LD/ST decode to NOP) | Arithmetic/branch/jump/LUI/shift/halt programs match golden lockstep; no forwarding stalls correct; cycle bound N+8; metrics |
+| M6 | `feat/m6-dmem` | `risc18.dmem.DataMemory` + LD/ST in the core | Load/store programs match golden incl. memory contents; load-use interlock; out-of-range read 0/write ignored; metrics |
+| M7 | `feat/m7-forwarding` | X/M forwarding + hazard refinement | Back-to-back ALU deps execute without stalls (cycles ≤ N+6 for an N-instruction dependent chain); load-use exactly one bubble; branch flush correctness; seeded random-program lockstep (≥20 programs); metrics |
+| M8 | `feat/m8-multiplier` | MUL through the ECP5 DSP | Products match golden for edge/random operands; yosys log shows `MULT18X18D` ≥ 1; MUL result latency handled by the interlock; metrics |
+| M9 | `feat/m9-optimization` | Timing closure + resource report | Full top with 25→60 MHz PLL, measured fmax ≥ 60 MHz (nextpnr), LUT/FF/EBR/DSP table in `docs/RESULTS.md`, critical path documented; all tests green |
+
+## Worker protocol
+
+1. `git fetch origin && git switch -c <branch> origin/main` in
+   `/home/alain/risc18`.
+2. Implement only the milestone scope. Do not push, do not open PRs, do not
+   touch `main`.
+3. Run the full suite and the synth gate. Commit (`feat: ...`), including the
+   metrics `.md` in `docs/metrics/` for your milestone.
+4. Report: files, test counts, synth numbers, known gaps.
+
+The controller then re-runs both gates, inspects the diff, pushes, opens the
+PR, runs two independent reviews, and merges only when clean.
