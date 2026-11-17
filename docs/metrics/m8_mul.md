@@ -11,6 +11,6 @@ constraint: 60.0 MHz
 | DP16KD | 0 | 56 |
 | MULT18X18D | 1 | 28 |
 
-* fmax `$glbnet$clk$TRELLIS_IO_IN`: 141.4 MHz (constraint 60.0 MHz, met)
+* fmax `$glbnet$clk$TRELLIS_IO_IN`: 140.23 MHz (constraint 60.0 MHz, met)
 
-* critical path: logic 4.5 ns, routing 2.6 ns
+* critical path: logic 4.5 ns, routing 2.7 ns

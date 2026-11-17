@@ -13,11 +13,13 @@ deliberate:
     Behavioural Amaranth: ``(i_a * i_b)[:18]``, with ``o_y`` registered when
     ``registered=True``.  This is the simulatable form -- Amaranth's
     pure-Python simulator has no model for a vendor ``Instance`` and drives its
-    outputs as 0, so a hard cell cannot be exercised in ``amaranth.sim`` -- and
-    it is what :class:`risc18.core.Core` uses, which keeps every core test
-    simulatable.  ``synth_ecp5`` infers exactly one ``MULT18X18D`` from it
-    (yosys ``$mul`` -> ``$__MUL18X18`` -> ``dsp_map.v``), which is why the
-    ``m8_core`` metric carries ``MULT18X18D = 1`` with no LUT multiplier.
+    outputs as 0, so a hard cell cannot be exercised in ``amaranth.sim``.  It
+    is the form this unit's own tests simulate, and ``synth_ecp5`` infers
+    exactly one ``MULT18X18D`` from it (yosys ``$mul`` -> ``$__MUL18X18`` ->
+    ``dsp_map.v``).  :class:`risc18.core.Core` does *not* instantiate the unit:
+    it keeps ``(dx_a * dx_b)[:18]`` inline so yosys maps the same single DSP
+    without paying for an extra module boundary (M8 measured that boundary at
+    +159 LUT4 / -3.95 MHz); see ``docs/metrics/m8_core.md``.
 
 ``cell=True``
     An explicit ``MULT18X18D`` primitive.  This is the form the
@@ -50,13 +52,17 @@ REG_INPUTA_CLK     ``NONE``           ``NONE``
 REG_INPUTB_CLK     ``NONE``           ``NONE``
 REG_PIPELINE_CLK   ``NONE``           ``NONE``
 REG_OUTPUT_CLK     ``NONE``           ``CLK0``
-CLK0 / CE0 / RST0  unconnected        ``sync`` clk, 1, 0
+CLK0 / CE0 / RST0  ``sync`` clk, 1, 0  ``sync`` clk, 1, 0
 SIGNEDA / SIGNEDB  0 (unsigned)       0 (unsigned)
 C0..C17            0                  0
 =================  =================  =================
 
-``P`` is 36 bits; all 36 are wired to a local bus but only ``P[17:0]`` is read, so the unused high half of
-the product is dropped inside the block; ``DP16KD`` stays 0 for this unit (it
+``RST0 = 0`` in both columns: the DSP's product register is never cleared by
+the enclosing reset, while the behavioural ``registered=True`` form is, so a
+registered consumer must discard its first product after a reset (nothing does
+that today).  ``P`` is 36 bits; all 36 are wired to a local bus but only
+``P[17:0]`` is read, so the unused high half of the product is dropped inside
+the block; ``DP16KD`` stays 0 for this unit (it
 has no memory) and no ``CCU2C``/``LUT4`` multiplier appears besides the cell's
 own fixed logic.
 """

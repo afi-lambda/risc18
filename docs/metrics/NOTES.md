@@ -154,7 +154,7 @@ design brief suggests. Use 19.1-23.6 ns as the observed starting range.
 
 ## M8 DSP multiplier
 
-* `MulTop` (combinational) is 0 LUT4, 54 FF, one MULT18X18D at 141.4 MHz;
+* `MulTop` (combinational) is 0 LUT4, 54 FF, one MULT18X18D at 140.23 MHz;
   `MulRegTop` (DSP output register, `REG_OUTPUT_CLK=CLK0`) is 0 LUT4, 54 FF, one
   MULT18X18D at 185.01 MHz. Both are pure DSP: no LUT/carry multiplier exists in
   either netlist, and `SIGNEDA/SIGNEDB=0` with `P[17:0]` read is correct because

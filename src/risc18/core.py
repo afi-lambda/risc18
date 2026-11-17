@@ -76,9 +76,8 @@ MUL is a single-cycle combinational 18x18 multiply masked to 18 bits, written
 inline so yosys maps it to one DSP without adding a module boundary (M8
 measured a +159 LUT4 / -3.95 MHz ABC remap for the equivalent submodule form).
 :class:`risc18.mul.Multiplier` exists for the DSP measurement tops and the
-registered option; the
-product is available in X, so MUL retires at CPI 1.0 and the X-stage forward
-path covers it like any other ALU result.  The unit's ``registered=True`` mode
+registered option; the product is available in X, so MUL retires at CPI 1.0
+and the X-stage forward path covers it like any other ALU result.  The unit's ``registered=True`` mode
 (one edge of latency, the DSP's own output register) needs a one-cycle X hold
 and was measured against this baseline in M8; the core keeps the
 zero-bubble form.
