@@ -351,10 +351,13 @@ class Core(Elaboratable):
         # effective address, the store data is the rs2 value captured in D.
         # A store commits on the X -> M edge; a load's word is on `o_rdata`
         # during M, one edge later.
+        # The reset term makes the boundary explicit: a store whose X cycle is
+        # the cycle the reset is asserted does not commit, so a reset never
+        # leaves a partial store behind from an instruction that never retires.
         m.d.comb += [
             dmem.i_addr.eq(alu.o_y),
             dmem.i_wdata.eq(dx_rs2),
-            dmem.i_we.eq(dx_valid & dx_mem_write),
+            dmem.i_we.eq(dx_valid & dx_mem_write & ~self.i_rst),
         ]
 
         # ------------------------------------------------------------- M ---

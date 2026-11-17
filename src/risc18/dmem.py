@@ -16,7 +16,7 @@ Interface and behaviour are frozen by ``docs/ISA.md`` sections 1 and 5:
   :class:`risc18.imem.InstrMemory`), and the write enable is qualified with the
   *combinational* in-range flag so no out-of-range write can reach the array;
 * ``init`` is a list of 18-bit words, zero-padded or truncated to exactly 1024
-  entries (``docs/ISA.md`` section 1);
+  entries (``docs/ISA.md`` section 5);
 * reset does not clear the contents -- an EBR has no reset on its array, and
   ``docs/ISA.md`` says reset performs no memory writes.  Only the in-range
   output flag is reset (it is an ordinary flop on the ``sync`` domain), so the
@@ -73,7 +73,11 @@ class DataMemory(Elaboratable):
 
         # Synchronous (non-transparent) read port: address sampled on the edge,
         # data after it.  Always enabled -- the interface has no read enable.
-        rp = mem.read_port(domain="sync")
+        # Both ports share ``i_addr``, so a store cycle is a same-address
+        # read+write; ``transparent=False`` makes that read see the old word
+        # (read-before-write, what the DP16KD READBEFOREWRITE mode gives), and
+        # no consumer looks at ``o_rdata`` for a store, so nothing depends on it.
+        rp = mem.read_port(domain="sync", transparent=False)
         m.d.comb += [
             rp.addr.eq(self.i_addr[:ADDR_BITS]),
             rp.en.eq(1),

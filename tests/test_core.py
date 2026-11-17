@@ -953,6 +953,63 @@ def test_independent_loads_pipeline_at_cpi_one():
     assert run.writes() == machine.trace
 
 
+def test_store_after_a_load_use_stall_commits_the_bypassed_word():
+    """A store held in D while its source load stalls must still commit data."""
+    program = [
+        addi(2, 0, 0x10),              # base A (imm6 is 6-bit signed)
+        addi(3, 0, 0x1F),              # base B (largest positive imm6)
+        ld(1, 2, 0),                   # r1 = data[0x10]
+        st(1, 3, 0),                   # st stalls in D while the load is in X
+        ld(4, 3, 0),                   # read back 0x1F
+        halt(),
+    ]
+    data = [0] * 1024
+    data[0x10] = 0x12345
+    machine = Machine(program)
+    machine.mem[:] = data[:]
+    machine.run(4000)
+    assert machine.halted
+    run = run_core(program, data=data)
+    assert run.halted
+    assert run.writes() == machine.trace, _diff(run.writes(), machine.trace)
+    assert len(run.retires) == machine.retired
+    assert (4, 4, 0x12345) in run.writes()
+
+
+def test_two_consecutive_stores_to_one_word_last_wins():
+    program = [
+        addi(2, 0, 0x10),
+        addi(1, 0, 7),
+        addi(4, 0, 9),
+        st(1, 2, 0),
+        st(4, 2, 0),
+        ld(3, 2, 0),
+        halt(),
+    ]
+    machine, run = assert_lockstep(program)
+    assert run.writes()[-1] == (5, 3, 9)
+
+
+def test_store_in_the_second_squash_slot_does_not_commit():
+    """BEQ over two words: neither the slot-1 nor the slot-2 store lands."""
+    program = [
+        br(isa.OP_BEQ, 1, 1, 2),       # taken: 0 -> 3
+        st(1, 0, 4),                   # slot 1, squashed
+        st(1, 0, 5),                   # slot 2, squashed
+        ld(2, 0, 4),                   # reads data[4], untouched
+        halt(),
+    ]
+    data = [0] * 1024
+    data[4] = 0x2AAAA
+    data[5] = 0x15555
+    machine = Machine(program)
+    machine.mem[:] = data[:]
+    machine.run(4000)
+    run = run_core(program, data=data)
+    assert run.writes() == machine.trace, _diff(run.writes(), machine.trace)
+    assert run.writes()[-1] == (3, 2, 0x2AAAA)
+
+
 def test_store_never_stalls_a_follower_on_its_rs2_field():
     """A store writes no register, so it can never cause a RAW stall.
 

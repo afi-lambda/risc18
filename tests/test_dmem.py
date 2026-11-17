@@ -127,6 +127,30 @@ def test_init_words_read_back():
     assert got == [IMAGE[a] for a in addrs], [hex(v) for v in got]
 
 
+def test_same_address_read_write_presents_the_old_word():
+    """A write to the address being read does not reach o_rdata that edge."""
+    image = [0x10000 | i for i in range(16)]
+    h = DmemHarness(image)
+    seen = []
+
+    async def tb(ctx):
+        await _reset(ctx, h)
+        await _read(ctx, h, 5)                   # 0x10005 is on o_rdata
+        ctx.set(h.dut.i_addr, 5)
+        ctx.set(h.dut.i_we, 1)
+        ctx.set(h.dut.i_wdata, 0x2AAAA)
+        await ctx.tick()                         # same-cycle read+write
+        await ctx.delay(SETTLE)
+        seen.append(ctx.get(h.dut.o_rdata))
+        ctx.set(h.dut.i_we, 0)
+        await ctx.tick()
+        await ctx.delay(SETTLE)
+        seen.append(ctx.get(h.dut.o_rdata))      # next read sees the new word
+
+    _run(h, tb)
+    assert seen == [0x10005, 0x2AAAA], [hex(v) for v in seen]
+
+
 def test_read_latency_is_exactly_one_cycle_and_not_transparent():
     """One edge after the address is sampled the word is there, not before."""
     image = [0x10000 | i for i in range(16)]
@@ -428,12 +452,15 @@ def test_data_memory_top_registers_inputs_and_outputs():
         await ctx.tick("tck")                  # EBR write + read of 9
         await ctx.tick("tck")
         await ctx.delay(SETTLE)
-        seen.append(ctx.get(top.o_rdata))      # 0x2CAFE, not image[9]
+        seen.append(ctx.get(top.o_rdata))      # read-before-write: image[9]
+        await ctx.tick("tck")                  # the next read sees the new word
+        await ctx.delay(SETTLE)
+        seen.append(ctx.get(top.o_rdata))      # 0x2CAFE
 
     _run(h, tb, domain="tck")
     # No reset in this top: the input register is 0 at the start, so the EBR
     # reads word 0 first and its output shows `init[0]` in the second cycle.
-    assert seen == [0, top.init[0], top.init[5], 0x2CAFE], \
+    assert seen == [0, top.init[0], top.init[5], top.init[9], 0x2CAFE], \
         [hex(v) for v in seen]
 
 

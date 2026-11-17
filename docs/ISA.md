@@ -146,10 +146,16 @@ class InstrMemory(Elaboratable):
     # synchronous read, data valid the cycle after i_addr/i_en are sampled
 
 class DataMemory(Elaboratable):
-    DataMemory()                  # 1024 x 18
+    DataMemory(init=None)         # 1024 x 18; init padded/truncated to 1024
     i_addr: Signal(16); i_wdata: Signal(18)
     i_we: Signal(1)
     o_rdata: Signal(18)           # synchronous read, 1-cycle latency
+    # addr >= 0x400: reads 0, writes ignored (address truncated to ten bits, a
+    # registered in-range flag masks the read data, the write enable is
+    # qualified with the combinational in-range flag).  Both ports share
+    # i_addr, so a store cycle is a same-address read+write; the read sees the
+    # old word (read-before-write) and no consumer looks at it.
+    # Reset performs no memory writes: contents survive a reset pulse.
 
 class BranchTarget(Elaboratable):
     i_pc: Signal(16); i_imm: Signal(18); i_rs1: Signal(18)
@@ -196,10 +202,9 @@ Core(program=[...], data=None)   # instruction words; optional 1024-word data im
 `cd.clk`/`cd.rst` and may not declare a second `sync` domain of its own.
 
 `o_retire` pulses once per instruction, in program order. The `o_retire_we=1`
-rows match `golden.Machine.trace` for every program without LD; in M5 an LD
-retires with `we=0` and writes nothing (M6 restores the write). `o_halt`
-asserts when the HALT instruction retires; fetching is already frozen at that
-point and the PC holds its post-HALT value.
+rows match `golden.Machine.trace` for every program, loads included (M6).
+`o_halt` asserts when the HALT instruction retires; fetching is already frozen
+at that point and the PC holds its post-HALT value.
 
 Pipeline (M6+): F (PC register, instruction EBR, FD register), D (decode,
 combinational regfile read, branch/jump resolution, hazard check), X (ALU,

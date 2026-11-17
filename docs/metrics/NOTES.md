@@ -74,17 +74,33 @@ Caveats that apply to every unit milestone (M0–M4):
 
 ## M6 data memory and LD/ST
 
-* `DataMemoryTop`: 24 LUT4, 84 FF, 1 DP16KD, 261.03 MHz. `CoreTop` at M6: 1908
-  LUT4, 584 FF, **2** DP16KD (instruction + data), 1 DSP, 49.12 MHz — a further
-  drop from M5's 53.89 MHz. The critical path is still the D stage, now with
-  the M-stage bypass mux in front of the branch compare and redirect select:
-  FD register -> decoder -> operand bypass mux -> compare/redirect -> FD
-  capture mux (4.8 ns logic, 15.5 ns routing). M9 owns closure; the M6 change
-  adds one mux level to a path that was already the limit.
+* `DataMemoryTop`: 6 LUT4, 54 FF, 1 DP16KD, 147.78 MHz; the 5.6 ns critical
+  path is the EBR clock-to-out to the output register, the same floor the
+  instruction EBR has. The unit's own state is one flag; most of the 54 FFs are
+  the wrapper's input/output registers and the registered read path.
+* The read port is built with `transparent=False` (read-before-write). The
+  legacy default (`transparent=True`) simulates a same-cycle write as visible
+  on the read port, while yosys maps that port to DP16KD `READBEFOREWRITE`, so
+  simulation and the netlist would disagree on a same-address read+write. The
+  non-transparent port costs ~210 LUT4 (1883 -> 2096 on CoreTop, seed 1) and is
+  kept for sim/netlist agreement; nothing in the core consumes the collided
+  word, so either choice is functionally correct today.
+* `CoreTop` at M6: 2096 LUT4, 584 FF, **2** DP16KD (instruction + data), 1 DSP.
+  fmax over seeds {1,2,3,7} = 48.56 / 51.28 / 52.19 / 51.54 MHz (mean ~50.9),
+  against M5's 48.5-55.7 over the same seeds: the mean drop is ~4 MHz and any
+  single-seed delta (the M6 PR quoted 49.12 vs 53.89) sits inside the ~7 MHz
+  placement spread, so quote the sweep, not one seed. The worst path is still
+  the D stage, now with the M-stage bypass *select chain* (`xm_we`/`xm_rd`/
+  `d_need` -> `stall`/`m_hit`) ahead of the operand mux and the branch compare:
+  FD register -> decoder -> bypass select + operand mux -> compare/redirect ->
+  FD capture mux. M7's X-forwarding lengthens exactly that chain, which is the
+  M9 risk to plan for (resolve the compare in X, precompute the branch
+  condition in M, or register the load word and accept a second load-use
+  bubble).
 * Stores are addressed combinationally from the X stage and commit on the X->M
-  edge; loads present their address in X, so the word is on the EBR output in
-  M and W captures it. That is one cycle earlier than a classic M-stage store
-  and is what makes the load-use cost exactly one bubble with an M->D bypass.
+  edge, qualified by X-stage validity and by `~i_rst`, so a store whose X cycle
+  is the reset cycle does not commit and a reset never leaves a partial store
+  from an instruction that never retires.
 * CPI: load-use pair 1.167 (one bubble); 10 back-to-back loads 1.000; distance-2
   dependencies 0 bubbles (M bypass); distance-1 ALU dependencies still 1 bubble,
   which is M7's to remove.
