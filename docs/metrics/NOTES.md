@@ -109,3 +109,18 @@ drop is ~2.4 MHz and any
 * CPI: load-use pair 1.167 (one bubble); 10 back-to-back loads 1.000; distance-2
   dependencies 0 bubbles (M bypass); distance-1 ALU dependencies still 1 bubble,
   which is M7's to remove.
+
+## M7 X-stage forwarding
+
+* `CoreTop` at M7: 2265 LUT4 (+169), 584 FF, 2 DP16KD, 1 DSP, 46.55 MHz on seed
+  1 (M6: 48.56). The extra 18-bit X-vs-M-vs-regfile select on both operand
+  paths is the whole LUT growth and the 2 MHz loss; the critical path is the
+  same D-stage chain with one more select level. Quote the seed sweep before
+  drawing conclusions from the delta.
+* CPI: a 20-instruction distance-1 ALU chain went 1.85 -> 1.00; a load-use chain
+  stays at exactly one bubble per load; the CoreTop image 1.62 -> 1.31 (the
+  remainder is the two-edge squash on taken branches); a memory loop
+  1.51 -> 1.37. Independent loads remain 1.00.
+* A JAL/JALR link value is never consumed at distance 1 by construction: the
+  jump resolves in D and empties the two younger fetch slots, so the
+  interesting case is the word after the target, which costs nothing.

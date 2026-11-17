@@ -55,6 +55,6 @@ tests/                  pytest suites (Amaranth simulation + golden lockstep)
 | M4 instruction EBR fetch | done |
 | M5 core without data memory | done |
 | M6 data EBR and LD/ST | done |
-| M7 forwarding and hazards | pending |
+| M7 forwarding and hazards | done |
 | M8 DSP multiplier | pending |
 | M9 timing and resource optimization | pending |
