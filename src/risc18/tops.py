@@ -12,11 +12,26 @@ from . import isa
 from .alu import ALU
 from .branch import BranchUnit
 from .decoder import PACK_WIDTH, Decoder, pack
+from .imem import DEPTH as IMEM_DEPTH, Fetch, InstrMemory
 from .pc import BranchTarget, PCUnit
 from .regfile import RegFile
 
-__all__ = ["AluTop", "BranchTargetTop", "BranchTop", "DecoderTop", "PcTop",
-           "RegFileTop"]
+__all__ = ["AluTop", "BranchTargetTop", "BranchTop", "DecoderTop", "FetchTop",
+           "InstrMemoryTop", "PcTop", "RegFileTop"]
+
+
+def _program(depth=IMEM_DEPTH):
+    """Deterministic non-trivial instruction pattern for the measurement tops.
+
+    The EBR must not be filled with zeros: an all-zero image invites yosys to
+    fold the memory away, and the milestone requires DP16KD >= 1 in the
+    metrics.  Bit 17 is always set, so no word is zero, and the low ten bits
+    are a bijection of the index (gcd(0x2D, 1024) == 1), so every address holds
+    a different value.
+    """
+    return [0x20000 | ((i * 0x2D) & 0x03FF) | ((i & 0x3) << 10)
+            | ((i & 0x3F) << 12)
+            for i in range(depth)]
 
 
 class DecoderTop(Elaboratable):
@@ -321,5 +336,110 @@ class PcTop(Elaboratable):
             pc_unit.i_hold.eq(hold_q),
         ]
         m.d.sync += self.o_pc.eq(pc_unit.o_pc)
+
+        return m
+
+
+class InstrMemoryTop(Elaboratable):
+    """Registered-in / registered-out wrapper around :class:`InstrMemory`.
+
+    Timing path measured by nextpnr: ``i_addr``/``i_en`` -> ``*_q`` (port to
+    register), then ``addr_q`` -> the DP16KD address input -> DOA (the EBR's
+    clock-enabled read path, ``CEA = en_q``, ``REGMODE_A="NOREG"``) -> the
+    ``o_data`` register, which is the interior register-to-register path that
+    carries fmax.  Three cycles of port-to-port latency (input register, EBR
+    access, output register).  The EBR is preloaded with
+    :func:`_program`'s deterministic 1024-word image so the milestone's
+    ``DP16KD >= 1`` requirement is meaningful.  Synthesis-only, like the other
+    unit tops: reset-less ``sync`` domain driven by ``self.clk``.
+    """
+
+    def __init__(self, init=None):
+        self.init = _program() if init is None else list(init)
+        self.clk = Signal()
+        self.i_addr = Signal(16)
+        self.i_en = Signal(1)
+        self.o_data = Signal(isa.WIDTH)
+        self.ports = [self.clk, self.i_addr, self.i_en, self.o_data]
+
+    def elaborate(self, platform):
+        m = Module()
+        cd = ClockDomain("sync", reset_less=True)
+        m.domains += cd
+        m.d.comb += cd.clk.eq(self.clk)
+        m.submodules.imem = imem = InstrMemory(self.init)
+
+        addr_q = Signal(16)
+        en_q = Signal(1)
+
+        m.d.sync += [
+            addr_q.eq(self.i_addr),
+            en_q.eq(self.i_en),
+        ]
+        m.d.comb += [
+            imem.i_addr.eq(addr_q),
+            imem.i_en.eq(en_q),
+        ]
+        m.d.sync += self.o_data.eq(imem.o_data)
+
+        return m
+
+
+class FetchTop(Elaboratable):
+    """Registered-in / registered-out wrapper around :class:`Fetch`.
+
+    Timing paths measured by nextpnr:
+
+    * ``i_redirect``/``i_target``/``i_hold`` -> ``*_q`` (port to register);
+    * ``*_q`` -> PC priority mux / incrementer -> the PC register (interior
+      register-to-register, the path that usually carries fmax);
+    * PC register -> DP16KD address/CE -> DOA -> ``o_instr`` register, and PC
+      register -> ``instr_pc`` register -> ``o_instr_pc`` register.
+
+    Four cycles of port-to-port latency (input register, PC register, EBR
+    access, output register).  Preloaded with :func:`_program`'s
+    image like :class:`InstrMemoryTop`.  Synthesis-only: reset-less ``sync``
+    domain driven by ``self.clk``, so the netlist has exactly one clock port
+    and no generated reset port.
+    """
+
+    def __init__(self, init=None):
+        self.init = _program() if init is None else list(init)
+        self.clk = Signal()
+        self.i_redirect = Signal(1)
+        self.i_target = Signal(16)
+        self.i_hold = Signal(1)
+        self.o_pc = Signal(16)
+        self.o_instr = Signal(isa.WIDTH)
+        self.o_instr_pc = Signal(16)
+        self.ports = [self.clk, self.i_redirect, self.i_target, self.i_hold,
+                      self.o_pc, self.o_instr, self.o_instr_pc]
+
+    def elaborate(self, platform):
+        m = Module()
+        cd = ClockDomain("sync", reset_less=True)
+        m.domains += cd
+        m.d.comb += cd.clk.eq(self.clk)
+        m.submodules.fetch = fetch = Fetch(self.init)
+
+        redirect_q = Signal(1)
+        target_q = Signal(16)
+        hold_q = Signal(1)
+
+        m.d.sync += [
+            redirect_q.eq(self.i_redirect),
+            target_q.eq(self.i_target),
+            hold_q.eq(self.i_hold),
+        ]
+        m.d.comb += [
+            fetch.i_redirect.eq(redirect_q),
+            fetch.i_target.eq(target_q),
+            fetch.i_hold.eq(hold_q),
+        ]
+        m.d.sync += [
+            self.o_pc.eq(fetch.o_pc),
+            self.o_instr.eq(fetch.o_instr),
+            self.o_instr_pc.eq(fetch.o_instr_pc),
+        ]
 
         return m
