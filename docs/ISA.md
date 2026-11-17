@@ -190,7 +190,7 @@ dependency against X/M destinations; the write-through regfile covers W);
 M6 adds the load-use interlock; M7 adds X and M forwarding so back-to-back
 ALU dependencies no longer stall and only load-use costs one bubble.
 
-Reset: the core forwards its synchronous active-high reset to the `sync`
+Reset: the core must forward its synchronous active-high reset to the `sync`
 domain's `rst`. Unit instances (including `PCUnit` and `RegFile`) must be
 elaborated under that reset-bearing domain; only the synthesis measurement
 tops in `tops.py` use a reset-less domain, and they are not the core.

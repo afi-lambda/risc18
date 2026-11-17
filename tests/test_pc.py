@@ -487,6 +487,7 @@ def test_pc_top_registers_inputs_and_outputs():
         ctx.set(top.i_hold, 0)
         await ctx.tick("tck")          # pc <= 1, o_pc <= 0
         await ctx.tick("tck")          # pc <= 2, o_pc <= 1
+        await ctx.delay(SETTLE)
         seen.append(ctx.get(top.o_pc))
 
         ctx.set(top.i_hold, 1)
