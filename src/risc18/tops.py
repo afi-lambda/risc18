@@ -6,7 +6,7 @@ meaningful fmax, see docs/MILESTONES.md), and expose a ``.ports`` list whose
 first entry is the clock.
 """
 
-from amaranth import Elaboratable, Module, Signal
+from amaranth import ClockDomain, Elaboratable, Module, Signal
 
 from . import isa
 from .decoder import PACK_WIDTH, Decoder, pack
@@ -19,7 +19,9 @@ class DecoderTop(Elaboratable):
 
     Timing path: ``i_instr`` -> ``instr_q`` -> combinational decode ->
     ``o_pack``.  Two clock cycles of latency from port to port, one interior
-    register-to-register path.
+    register-to-register path.  The top is synthesis-only: it declares a
+    reset-less ``sync`` domain driven by ``self.clk``, so the netlist has
+    exactly one clock port and no generated reset port.
 
     ``o_pack`` bit layout (LSB first, 54 bits total, ``risc18.decoder.
     PACK_LAYOUT`` is the single source of truth):
@@ -57,6 +59,9 @@ class DecoderTop(Elaboratable):
 
     def elaborate(self, platform):
         m = Module()
+        cd = ClockDomain("sync", reset_less=True)
+        m.domains += cd
+        m.d.comb += cd.clk.eq(self.clk)
         m.submodules.decoder = decoder = Decoder()
 
         instr_q = Signal(isa.WIDTH)

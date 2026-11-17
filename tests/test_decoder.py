@@ -7,7 +7,7 @@ decoder's logic directly.  The conformance oracle is the frozen reference
 
 import random
 
-import pytest
+from amaranth.back import verilog
 from amaranth.sim import Simulator
 
 from risc18 import isa
@@ -67,11 +67,38 @@ def _assert_isa_match(words, chunks=8):
                      + "\n".join(bad[:chunks]))
 
 
-def _packed(decoded):
-    value = 0
-    for name, offset, width in PACK_LAYOUT:
-        value |= (getattr(decoded, name) & ((1 << width) - 1)) << offset
-    return value
+# --- literal table (independent of isa.decode) ------------------------------
+
+# Hand-decoded from docs/ISA.md: (op, rd, rs1, rs2, imm, alu_op, alu_src_imm,
+# shift_amt, reg_write, mem_read, mem_write, mul, branch, branch_cond, jump,
+# jump_reg, halt, rs1_used, rs2_used).  Kept as literals so a shared drift in
+# isa.py + decoder.py fails the suite.
+LITERAL_CASES = {
+    0x00567: (0, 5, 6, 7, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),      # add r5,r6,r7
+    0x01567: (0, 5, 6, 7, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1),      # sub
+    0x044BF: (1, 1, 2, 1, 0x3FFFF, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0),  # addi r1,r2,-1
+    0x084BF: (2, 1, 2, 1, 0x3F, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0),     # andi
+    0x10D05: (4, 3, 4, 3, 5, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0),        # ld r3,5(r4)
+    0x155BE: (5, 5, 6, 5, 0x3FFFE, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1),  # st r5,-2(r6)
+    0x1887D: (6, 2, 1, 2, 0x3FFFD, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1),  # beq r1,r2,-3
+    0x2A7FE: (10, 9, 15, 9, 0x3FFFE, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0),  # jal r9,-2
+    0x31955: (12, 6, 5, 6, 0x15500, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),   # lui r6,0x155
+    0x34234: (13, 2, 3, 4, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1),       # mul r2,r3,r4
+    0x3A043: (14, 8, 1, 8, 3, 4, 0, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0),      # sll r8,r1,3
+    0x3C001: (15, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0),      # halt
+}
+
+
+def test_literal_encoding_table():
+    seen = _run(list(LITERAL_CASES))
+    for (word, expected), got in zip(LITERAL_CASES.items(), seen):
+        assert got == expected, f"0x{word:05X}: {got} != {expected}"
+
+
+def test_every_immediate_value_per_opcode():
+    words = [(op << 14) | imm6 for op in range(16) for imm6 in range(64)]
+    assert len(words) == 1024
+    _assert_isa_match(words, chunks=16)
 
 
 # --- opcode / format coverage ----------------------------------------------
@@ -258,35 +285,14 @@ def test_pack_layout_is_total_and_contiguous():
     assert offset == PACK_WIDTH
 
 
-def test_decoder_top_registers_input_and_pack():
+def test_decoder_top_has_single_clock_and_no_generated_reset():
     top = DecoderTop()
-    assert top.ports[0] is top.clk
     assert top.ports == [top.clk, top.i_instr, top.o_pack]
+    v = verilog.convert(top, name="top", ports=top.ports)
+    header = v.split(");", 1)[0]
+    assert "clk" in header
+    assert header.count(",") == 2          # exactly three ports
+    assert "clk$" not in header            # no auto-generated second clock
+    assert "rst" not in v                  # reset-less sync domain
+    assert v.count("posedge clk") == 2     # instr_q and o_pack registers
 
-    words = [isa.i_type(isa.OP_ADDI, 1, 2, -1),
-             isa.r_type(isa.OP_ALU, isa.ALU_SUB, 4, 5, 6),
-             isa.b_type(isa.OP_BLT, 3, 4, -7),
-             isa.j_type(isa.OP_LUI, 9, 0x155),
-             isa.i_type(isa.OP_SYSTEM, 0, 0, isa.SYS_HALT)]
-
-    sim = Simulator(top)
-    sim.add_clock(1e-6)
-    seen = []
-
-    async def tb(ctx):
-        assert ctx.get(top.o_pack) == 0            # reset value
-        prev = 0                                   # instruction in flight
-        for word in words:
-            ctx.set(top.i_instr, word)
-            await ctx.tick()
-            # input register captured; packed output still shows the old word
-            assert ctx.get(top.o_pack) == _packed(isa.decode(prev))
-            prev = word
-            await ctx.tick()
-            got = ctx.get(top.o_pack)
-            assert got == _packed(isa.decode(word))
-            seen.append(got)
-
-    sim.add_testbench(tb)
-    sim.run()
-    assert seen == [_packed(isa.decode(w)) for w in words]

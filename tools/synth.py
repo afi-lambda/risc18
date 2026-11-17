@@ -66,13 +66,21 @@ def parse_util(text: str):
 
 
 def parse_fmax(text: str):
-    out = []
+    """Return one entry per clock, keeping the last (post-route) report.
+
+    nextpnr prints a placement-time estimate and then the routed result; only
+    the routed one is the milestone evidence.
+    """
+    found = {}
+    order = []
     for name, mhz, verdict, target in re.findall(
             r"Max frequency for clock '([^']+)': ([\d.]+) MHz \((\w+) at ([\d.]+) MHz\)",
             text):
-        out.append({"clock": name, "fmax_mhz": float(mhz),
-                    "constraint_mhz": float(target), "met": verdict == "PASS"})
-    return out
+        if name not in found:
+            order.append(name)
+        found[name] = {"clock": name, "fmax_mhz": float(mhz),
+                       "constraint_mhz": float(target), "met": verdict == "PASS"}
+    return [found[name] for name in order]
 
 
 def parse_critical(text: str):
@@ -83,7 +91,7 @@ def parse_critical(text: str):
     block = m.group(1)
     head = [ln.replace("Info:", "").strip()
             for ln in block.splitlines() if ln.strip().startswith("Info:")][:12]
-    split = re.search(r"Info:\s+([\d.]+)\s+logic,\s+([\d.]+)\s+routing", block)
+    split = re.search(r"Info:\s+([\d.]+)\s+ns logic,\s+([\d.]+)\s+ns routing", block)
     return {
         "head": head,
         "logic_ns": float(split.group(1)) if split else None,
@@ -162,7 +170,7 @@ def main():
                          f"(constraint {f['constraint_mhz']} MHz, "
                          f"{'met' if f['met'] else 'missed'})")
         lines.append("")
-    if report.get("critical"):
+    if report.get("critical") and report["critical"]["logic_ns"] is not None:
         c = report["critical"]
         lines.append(f"* critical path: logic {c['logic_ns']} ns, "
                      f"routing {c['routing_ns']} ns")
@@ -174,7 +182,7 @@ def main():
     for f in report.get("fmax", []):
         print(f"  fmax {f['clock']}: {f['fmax_mhz']} MHz "
               f"({'met' if f['met'] else 'missed'} {f['constraint_mhz']} MHz)")
-    if report.get("critical"):
+    if report.get("critical") and report["critical"]["logic_ns"] is not None:
         print(f"  crit: {report['critical']['logic_ns']} ns logic, "
               f"{report['critical']['routing_ns']} ns routing")
     print(f"  metrics: {metrics_dir/args.name}.json")
