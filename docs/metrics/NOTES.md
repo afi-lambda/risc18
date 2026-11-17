@@ -28,3 +28,12 @@ Caveats that apply to every unit milestone (M0–M4):
   a passthrough variant measured ~108 LUT4; a shared SRL/SRA right-shift
   network with a fill mux measured 363 LUT4 / 120 MHz. Re-measure through the
   full flow before using either as an M9 plan.
+* M3 PC / branch target (FF convention: every register in the top, input and
+  output, counts as wrapper): PcTop is 50 FFs = 34 wrapper (input + output) +
+  16 PC; BranchTargetTop is 65 FFs = 49 wrapper (input + 16-bit output) + 0
+  unit FFs, with `imm_q`/`rs1_q` 16 bits wide because the upper immediate bits
+  are dead. Unit LUT figures here are pre-mapping yosys cells; nextpnr adds
+  2 LUT4 per CCU2C (17 + 2×8 = 33, 16 + 2×16 = 48). The `hold` input costs no
+  LUT: it becomes a native FF clock enable. BranchTarget builds two adders
+  although only 16 result bits are used; collapsing to one adder with a muxed
+  addend is an M5 option.

@@ -12,9 +12,11 @@ from . import isa
 from .alu import ALU
 from .branch import BranchUnit
 from .decoder import PACK_WIDTH, Decoder, pack
+from .pc import BranchTarget, PCUnit
 from .regfile import RegFile
 
-__all__ = ["AluTop", "BranchTop", "DecoderTop", "RegFileTop"]
+__all__ = ["AluTop", "BranchTargetTop", "BranchTop", "DecoderTop", "PcTop",
+           "RegFileTop"]
 
 
 class DecoderTop(Elaboratable):
@@ -222,5 +224,102 @@ class BranchTop(Elaboratable):
             branch.i_cond.eq(cond_q),
         ]
         m.d.sync += self.o_taken.eq(branch.o_taken)
+
+        return m
+
+
+class BranchTargetTop(Elaboratable):
+    """Registered-in / registered-out wrapper around :class:`BranchTarget`.
+
+    Timing path measured by nextpnr: ``i_pc``/``i_imm``/``i_rs1``/``i_jump_reg``
+    -> ``*_q``, then ``*_q`` -> signed add / target mux -> ``o_target``
+    register, which is the interior register-to-register path that carries
+    fmax.  Two cycles of port-to-port latency.  Synthesis-only: reset-less
+    ``sync`` domain driven by ``self.clk``, so the netlist has exactly one
+    clock port and no generated reset port.
+    """
+
+    def __init__(self):
+        self.clk = Signal()
+        self.i_pc = Signal(16)
+        self.i_imm = Signal(isa.WIDTH)
+        self.i_rs1 = Signal(isa.WIDTH)
+        self.i_jump_reg = Signal(1)
+        self.o_target = Signal(16)
+        self.ports = [self.clk, self.i_pc, self.i_imm, self.i_rs1,
+                      self.i_jump_reg, self.o_target]
+
+    def elaborate(self, platform):
+        m = Module()
+        cd = ClockDomain("sync", reset_less=True)
+        m.domains += cd
+        m.d.comb += cd.clk.eq(self.clk)
+        m.submodules.branch_target = target = BranchTarget()
+
+        pc_q = Signal(16)
+        imm_q = Signal(isa.WIDTH)
+        rs1_q = Signal(isa.WIDTH)
+        jump_reg_q = Signal(1)
+
+        m.d.sync += [
+            pc_q.eq(self.i_pc),
+            imm_q.eq(self.i_imm),
+            rs1_q.eq(self.i_rs1),
+            jump_reg_q.eq(self.i_jump_reg),
+        ]
+        m.d.comb += [
+            target.i_pc.eq(pc_q),
+            target.i_imm.eq(imm_q),
+            target.i_rs1.eq(rs1_q),
+            target.i_jump_reg.eq(jump_reg_q),
+        ]
+        m.d.sync += self.o_target.eq(target.o_target)
+
+        return m
+
+
+class PcTop(Elaboratable):
+    """Registered-in / registered-out wrapper around :class:`PCUnit`.
+
+    Timing path measured by nextpnr: ``i_redirect``/``i_target``/``i_hold`` ->
+    ``*_q``, then ``*_q`` -> PC priority mux / incrementer -> PC register ->
+    ``o_pc`` register, which is the interior register-to-register path that
+    carries fmax.  Three cycles of port-to-port latency (input register, PC
+    register, output register).  Synthesis-only: reset-less ``sync`` domain
+    driven by ``self.clk``, so the netlist has exactly one clock port and no
+    generated reset port.
+    """
+
+    def __init__(self):
+        self.clk = Signal()
+        self.i_redirect = Signal(1)
+        self.i_target = Signal(16)
+        self.i_hold = Signal(1)
+        self.o_pc = Signal(16)
+        self.ports = [self.clk, self.i_redirect, self.i_target, self.i_hold,
+                      self.o_pc]
+
+    def elaborate(self, platform):
+        m = Module()
+        cd = ClockDomain("sync", reset_less=True)
+        m.domains += cd
+        m.d.comb += cd.clk.eq(self.clk)
+        m.submodules.pc = pc_unit = PCUnit()
+
+        redirect_q = Signal(1)
+        target_q = Signal(16)
+        hold_q = Signal(1)
+
+        m.d.sync += [
+            redirect_q.eq(self.i_redirect),
+            target_q.eq(self.i_target),
+            hold_q.eq(self.i_hold),
+        ]
+        m.d.comb += [
+            pc_unit.i_redirect.eq(redirect_q),
+            pc_unit.i_target.eq(target_q),
+            pc_unit.i_hold.eq(hold_q),
+        ]
+        m.d.sync += self.o_pc.eq(pc_unit.o_pc)
 
         return m
