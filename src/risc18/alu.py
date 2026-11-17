@@ -11,12 +11,10 @@ Interface and behaviour are frozen by ``docs/ISA.md`` sections 4 and 5:
   see a wider amount, so amounts are 0..15 and a shift by 0 is the identity;
 * SRA sign-fills from bit 17, ROR rotates right inside the 18-bit word.
 
-ADD and SUB use Amaranth's plain ``+``/``-`` operators with no explicit
-width forcing beyond the 18-bit output assignment.  Yosys maps exactly that
-form onto the ECP5 carry chain (``CCU2C``); writing them as signed or
-extending the operands would instead push the design towards a DSP block,
-which the ISA does not want for the scalar datapath (MUL claims the DSP in
-M8).
+ADD and SUB use Amaranth's plain ``+``/``-`` operators.  Yosys maps exactly
+that form onto the ECP5 carry chain (``CCU2C``); ``MULT18X18D`` cells come only
+from the M8 multiply path, since ``synth_ecp5`` inserts DSPs from ``$mul``, not
+from adder signedness or width.
 """
 
 from amaranth import Elaboratable, Module, Signal

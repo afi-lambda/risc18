@@ -57,7 +57,7 @@ def run(cmd, log: pathlib.Path):
 
 def parse_util(text: str):
     util = {}
-    for name in ("LUT4", "TRELLIS_FF", "DP16KD", "MULT18X18D", "CCU2C"):
+    for name in ("LUT4", "TRELLIS_FF", "DP16KD", "MULT18X18D"):
         m = (re.search(rf"Total {name}s:\s+(\d+)/\s*(\d+)", text)
              or re.search(rf"{name}:\s+(\d+)/\s*(\d+)", text))
         if m:

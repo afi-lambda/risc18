@@ -61,9 +61,11 @@ def ref_alu(op, a, b):
     if op == OP_SRA:
         return (to_signed(a) >> amt) & MASK
     if op == OP_ROR:
-        # Python's >> is logical for non-negative ints, so this is a rotate
-        # inside 18 bits; amt == 0 leaves ``a`` untouched.
-        return ((a >> amt) | (a << (WIDTH - amt))) & MASK
+        # Bit-index rotate: independent of the RTL's shift/OR construction.
+        if amt == 0:
+            return a
+        return sum(((a >> k) & 1) << ((k - amt) % WIDTH)
+                   for k in range(WIDTH)) & MASK
     raise AssertionError(f"bad op {op}")
 
 
@@ -446,6 +448,10 @@ def test_alu_top_registers_inputs_and_outputs():
         await ctx.delay(SETTLE)
         observed.append(ctx.get(top.o_y))
         await ctx.tick("tck")
+        await ctx.delay(SETTLE)
+        # One edge only captures the new inputs; the output register still
+        # holds the previous result.  A single-stage top would already show SRA.
+        observed.append(ctx.get(top.o_y))
         await ctx.tick("tck")
         await ctx.delay(SETTLE)
         observed.append(ctx.get(top.o_y))
@@ -453,4 +459,27 @@ def test_alu_top_registers_inputs_and_outputs():
     _run(h, tb)
     assert observed[0] == 0x23450, observed
     assert observed[1] == 0x23450, observed
-    assert observed[2] == 0x30000, observed
+    assert observed[2] == 0x23450, observed
+    assert observed[3] == 0x30000, observed
+
+
+def test_alu_agrees_with_frozen_golden_model():
+    """The milestone gate: ALU output vs the frozen instruction-accurate model."""
+    from risc18 import golden
+
+    h = AluHarness()
+    rng = random.Random(0x2A18)
+    seen = []
+
+    async def tb(ctx):
+        for _ in range(300):
+            op = rng.randrange(8)
+            a = rng.randrange(1 << WIDTH)
+            b = rng.randrange(1 << WIDTH)
+            seen.append((op, a, b, await _eval(ctx, h.dut, op, a, b)))
+
+    _run(h, tb)
+    for op, a, b, y in seen:
+        b_arg = (b & 0xF) if op >= 4 else b   # shifts only read i_b[3:0]
+        exp = golden._alu(op, a, b_arg)
+        assert y == exp, f"op={op} a={a:#x} b={b:#x}: {y:#x} != {exp:#x}"

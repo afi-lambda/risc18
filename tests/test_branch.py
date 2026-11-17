@@ -311,6 +311,10 @@ def test_branch_top_registers_inputs_and_outputs():
         await ctx.delay(SETTLE)
         observed.append(ctx.get(top.o_taken))
         await ctx.tick("tck")
+        await ctx.delay(SETTLE)
+        # One edge captures the new operands; the predicate register still
+        # holds the old result, so a single-stage top is distinguishable.
+        observed.append(ctx.get(top.o_taken))
         await ctx.tick("tck")
         await ctx.delay(SETTLE)
         observed.append(ctx.get(top.o_taken))
@@ -318,4 +322,24 @@ def test_branch_top_registers_inputs_and_outputs():
     _run(h, tb)
     assert observed[0] == 1, observed
     assert observed[1] == 1, observed
-    assert observed[2] == 0, observed
+    assert observed[2] == 1, observed
+    assert observed[3] == 0, observed
+
+
+def test_branch_agrees_with_frozen_golden_model():
+    """The milestone gate: predicate vs the frozen instruction-accurate model."""
+    from risc18 import golden
+
+    h = BranchHarness()
+    seen = []
+
+    async def tb(ctx):
+        for cond in CONDS:
+            for a in SIGNED_EDGES:
+                for b in SIGNED_EDGES:
+                    seen.append((cond, a, b,
+                                 await _eval(ctx, h.dut, cond, a, b)))
+
+    _run(h, tb)
+    for cond, a, b, got in seen:
+        assert got == int(golden._cond(cond, a, b)), (cond, a, b, got)

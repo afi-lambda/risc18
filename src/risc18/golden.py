@@ -27,6 +27,7 @@ def _alu(op: int, a: int, b: int) -> int:
         return a | b
     if op >= 4:  # SHIFT group: 4 SLL, 5 SRL, 6 SRA, 7 ROR
         kind = op - 4
+        b &= 0xF  # amount is the 4-bit imm6[3:0] field (ISA section 4)
         if kind == SHIFT_SLL:
             return (a << b) & MASK
         if kind == SHIFT_SRL:

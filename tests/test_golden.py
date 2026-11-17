@@ -82,3 +82,12 @@ def test_mul_low_bits():
         isa.i_type(isa.OP_SYSTEM, 0, 0, isa.SYS_HALT),
     ])
     assert m.regs[2] == 1
+
+
+def test_shift_amount_is_masked_to_four_bits():
+    """The ISA shift amount is imm6[3:0]; wider values must not crash or leak."""
+    from risc18 import golden
+
+    assert golden._alu(4 + isa.SHIFT_SLL, 1, 16) == 1          # amount 16 -> 0
+    assert (golden._alu(4 + isa.SHIFT_ROR, 0x12345, 18)
+            == golden._alu(4 + isa.SHIFT_ROR, 0x12345, 2))

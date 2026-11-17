@@ -22,3 +22,8 @@ Caveats that apply to every unit milestone (M0–M4):
   the measurement shell. Two 16:1 read muxes dominate the LUT count; a binary
   tree over the index bits was measured at ~700 LUT4 with identical behaviour
   and is a candidate for M9, not an M1 defect.
+* M2 ALU: all 339 LUT4 are the unit (the wrapper adds only 57 FFs). The shift
+  group is about two thirds of it (a passthrough variant is ~108 LUT4) and is
+  the fmax limiter at 101.95 MHz. A shared SRL/SRA right-shift network with a
+  fill mux measured 363 LUT4 / 120 MHz, within pnr variance, and is the only
+  cheap M9 candidate observed; re-measure through the full flow before using.
