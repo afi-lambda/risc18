@@ -78,13 +78,15 @@ Caveats that apply to every unit milestone (M0–M4):
   path is the EBR clock-to-out to the output register, the same floor the
   instruction EBR has. The unit's own state is one flag; most of the 54 FFs are
   the wrapper's input/output registers and the registered read path.
-* The read port is built with `transparent=False` (read-before-write). The
-  legacy default (`transparent=True`) simulates a same-cycle write as visible
-  on the read port, while yosys maps that port to DP16KD `READBEFOREWRITE`, so
-  simulation and the netlist would disagree on a same-address read+write. The
-  non-transparent port costs ~210 LUT4 (1883 -> 2096 on CoreTop, seed 1) and is
-  kept for sim/netlist agreement; nothing in the core consumes the collided
-  word, so either choice is functionally correct today.
+* The read port is built with `transparent=False` (read-before-write) and both
+  tops now map the data EBR to DP16KD `READBEFOREWRITE` with `REGMODE_A=NOREG`,
+  which is what the simulation asserts. With the legacy `transparent=True`
+  default the two tops mapped differently and neither matched the simulation
+  contract: DataMemoryTop got a READBEFOREWRITE primitive plus a ~30-FF fabric
+  bypass, CoreTop got `WRITEMODE_A=WRITETHROUGH`. The non-transparent port costs
+  ~210 LUT4 (1883 -> 2096 on CoreTop, seed 1) and is kept so the contract does
+  not depend on which of those yosys builds; nothing in the core consumes the
+  collided word, so either choice is functionally correct today.
 * `CoreTop` at M6: 2096 LUT4, 584 FF, **2** DP16KD (instruction + data), 1 DSP.
   fmax over seeds {1,2,3,7} = 48.56 / 51.28 / 52.19 / 51.54 MHz (mean ~50.9),
   against M5's 48.5-55.7 over the same seeds: the mean drop is ~4 MHz and any
@@ -98,9 +100,11 @@ Caveats that apply to every unit milestone (M0–M4):
   condition in M, or register the load word and accept a second load-use
   bubble).
 * Stores are addressed combinationally from the X stage and commit on the X->M
-  edge, qualified by X-stage validity and by `~i_rst`, so a store whose X cycle
-  is the reset cycle does not commit and a reset never leaves a partial store
-  from an instruction that never retires.
+  edge, qualified by X-stage validity and by `~i_rst`: a store whose X cycle is
+  the reset cycle does not commit. A store that already committed on the X->M
+  edge stays written even if a reset kills it before W -- reset does not undo
+  memory writes. `test_reset_on_the_stores_x_cycle_does_not_commit_it` pins the
+  boundary and is red without the gate.
 * CPI: load-use pair 1.167 (one bubble); 10 back-to-back loads 1.000; distance-2
   dependencies 0 bubbles (M bypass); distance-1 ALU dependencies still 1 bubble,
   which is M7's to remove.

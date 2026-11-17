@@ -997,6 +997,7 @@ def test_store_in_the_second_squash_slot_does_not_commit():
         st(1, 0, 4),                   # slot 1, squashed
         st(1, 0, 5),                   # slot 2, squashed
         ld(2, 0, 4),                   # reads data[4], untouched
+        ld(3, 0, 5),                   # reads data[5], untouched
         halt(),
     ]
     data = [0] * 1024
@@ -1007,7 +1008,79 @@ def test_store_in_the_second_squash_slot_does_not_commit():
     machine.run(4000)
     run = run_core(program, data=data)
     assert run.writes() == machine.trace, _diff(run.writes(), machine.trace)
-    assert run.writes()[-1] == (3, 2, 0x2AAAA)
+    assert run.writes()[-2] == (3, 2, 0x2AAAA)
+    assert run.writes()[-1] == (4, 3, 0x15555)
+
+
+def test_reset_on_the_stores_x_cycle_does_not_commit_it():
+    """A store whose X cycle is a reset cycle must not reach memory.
+
+    The program is 27 NOPs followed by ``ld r1,[9] / addi r2,r1,1 / st r2,[9] /
+    ld r3,[9]``.  The store is word 29; the cycles are calibrated from an
+    undisturbed run (the store retires two cycles after its X cycle), so the
+    test does not hard-code the pipeline depth.  A one-cycle reset while the
+    store is in X discards it, so the replay's first load sees 0, its store
+    writes 1 and the final ``ld r3,[9]`` retires 1.  Without the reset gate the
+    store commits anyway: the replay loads 1, stores 2, the final load retires
+    2.
+    """
+    program = [nop() for _ in range(27)] + [
+        ld(1, 0, 9),
+        addi(2, 1, 1),
+        st(2, 0, 9),
+        ld(3, 0, 9),
+        halt(),
+    ]
+    assert len(program) == 32
+
+    def run(reset_cycle=None):
+        core = Core(program, data=[0] * 1024)
+        seen = {}
+
+        sim = Simulator(core)
+        sim.add_clock(CLK_PERIOD, domain="sync")
+
+        async def tb(ctx):
+            rows = []
+            ctx.set(core.i_rst, 1)
+            await ctx.tick()
+            await ctx.delay(SETTLE)
+            ctx.set(core.i_rst, 0)
+            for cycle in range(1, 300):
+                if cycle == reset_cycle:
+                    ctx.set(core.i_rst, 1)
+                    await ctx.tick()
+                    await ctx.delay(SETTLE)
+                    ctx.set(core.i_rst, 0)
+                    continue
+                await ctx.tick()
+                await ctx.delay(SETTLE)
+                if ctx.get(core.o_retire):
+                    rows.append((cycle, ctx.get(core.o_retire_pc),
+                                 ctx.get(core.o_retire_we),
+                                 ctx.get(core.o_retire_rd),
+                                 ctx.get(core.o_retire_value)))
+                if ctx.get(core.o_halt):
+                    break
+            seen["rows"] = rows
+
+        sim.add_testbench(tb)
+        sim.run()
+        return seen["rows"]
+
+    def final_load(rows):
+        loads = [r for r in rows if r[1] == 30 and r[2]]
+        assert loads, rows
+        return loads[-1][4]
+
+    reference = run()
+    store_retire = [r[0] for r in reference if r[1] == 29]
+    assert len(store_retire) == 1, store_retire
+    commit = store_retire[0]           # last cycle a reset can still kill it
+
+    assert final_load(run(commit - 2)) == 1   # well before the commit
+    assert final_load(run(commit - 1)) == 1   # on its X cycle: discarded
+    assert final_load(run(commit)) == 2       # already committed: survives
 
 
 def test_store_never_stalls_a_follower_on_its_rs2_field():

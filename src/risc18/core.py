@@ -36,7 +36,8 @@ X stage just computed, and the write data is the rs2 value the D stage
 captured.  One cycle later the addressed word is on ``o_rdata`` while the
 instruction is in M, which is what makes the load-use cost a single bubble:
 
-* a store commits at the X -> M edge (``i_we = dx_valid & dx_mem_write``), so
+* a store commits at the X -> M edge (``i_we = dx_valid & dx_mem_write &
+  ~i_rst``), so
   the store in front of a load is already in the array when the load addresses
   it one cycle later;
 * a load's word is on ``o_rdata`` during M, so the M stage carries the value
@@ -352,8 +353,9 @@ class Core(Elaboratable):
         # A store commits on the X -> M edge; a load's word is on `o_rdata`
         # during M, one edge later.
         # The reset term makes the boundary explicit: a store whose X cycle is
-        # the cycle the reset is asserted does not commit, so a reset never
-        # leaves a partial store behind from an instruction that never retires.
+        # the cycle the reset is asserted does not commit.  A store that has
+        # already committed on the X -> M edge stays written even if a reset
+        # then kills it before W: reset does not undo memory writes.
         m.d.comb += [
             dmem.i_addr.eq(alu.o_y),
             dmem.i_wdata.eq(dx_rs2),
