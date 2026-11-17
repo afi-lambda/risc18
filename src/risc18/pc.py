@@ -53,8 +53,10 @@ class BranchTarget(Elaboratable):
 
         imm_s = self.i_imm.as_signed()
 
-        # pc + 1 in 17 bits (cannot wrap: 0xFFFF + 1 = 0x10000), then widened
-        # to 18 signed bits so the signed immediate can be added without loss.
+        # pc + 1 in 17 bits (0xFFFF + 1 = 0x10000), sign-extended into a 19-bit
+        # signed sum.  Reading pc_next = 0x10000 as -65536 is immaterial
+        # because only the low 16 bits of the sum are consumed and 2^17 is a
+        # multiple of 2^16.
         pc_next = Signal(PC_WIDTH + 1)
         m.d.comb += pc_next.eq(self.i_pc + 1)
         rel_sum = Signal(signed(isa.WIDTH + 1))

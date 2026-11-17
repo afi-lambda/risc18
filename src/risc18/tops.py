@@ -284,9 +284,10 @@ class PcTop(Elaboratable):
     Timing path measured by nextpnr: ``i_redirect``/``i_target``/``i_hold`` ->
     ``*_q``, then ``*_q`` -> PC priority mux / incrementer -> PC register ->
     ``o_pc`` register, which is the interior register-to-register path that
-    carries fmax.  Two cycles of port-to-port latency.  Synthesis-only:
-    reset-less ``sync`` domain driven by ``self.clk``, so the netlist has
-    exactly one clock port and no generated reset port.
+    carries fmax.  Three cycles of port-to-port latency (input register, PC
+    register, output register).  Synthesis-only: reset-less ``sync`` domain
+    driven by ``self.clk``, so the netlist has exactly one clock port and no
+    generated reset port.
     """
 
     def __init__(self):

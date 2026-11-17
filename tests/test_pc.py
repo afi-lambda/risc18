@@ -457,6 +457,9 @@ def test_branch_target_top_registers_inputs_and_outputs():
         ctx.set(top.i_rs1, 0x0000)
         ctx.set(top.i_jump_reg, 0)
         await ctx.tick("tck")          # samples inputs into *_q
+        await ctx.delay(SETTLE)
+        # Output register still holds the previous target: one stage only.
+        seen.append(ctx.get(top.o_target))
         await ctx.tick("tck")          # combinational target latched
         await ctx.delay(SETTLE)
         seen.append(ctx.get(top.o_target))
@@ -471,7 +474,7 @@ def test_branch_target_top_registers_inputs_and_outputs():
         seen.append(ctx.get(top.o_target))
 
     _run(h, tb, domain="tck")
-    assert seen == [0x0001, 0x0106, 0x02FE], [hex(v) for v in seen]
+    assert seen == [0x0001, 0x0001, 0x0106, 0x02FE], [hex(v) for v in seen]
 
 
 def test_pc_top_registers_inputs_and_outputs():
@@ -498,12 +501,40 @@ def test_pc_top_registers_inputs_and_outputs():
         ctx.set(top.i_hold, 0)
         ctx.set(top.i_redirect, 1)
         ctx.set(top.i_target, 0x2ABC)
-        for _ in range(3):
-            await ctx.tick("tck")
+        await ctx.tick("tck")          # input registers capture redirect
+        await ctx.delay(SETTLE)
+        seen.append(ctx.get(top.o_pc))     # unchanged: no visible effect yet
+        await ctx.tick("tck")          # PC register loads target
+        await ctx.delay(SETTLE)
+        seen.append(ctx.get(top.o_pc))     # still the pre-redirect PC
+        await ctx.tick("tck")          # output register follows
         await ctx.delay(SETTLE)
         seen.append(ctx.get(top.o_pc))
 
     _run(h, tb, domain="tck")
-    # Two-cycle port latency: o_pc trails the PC register by one cycle, so the
-    # hold is already in force by the time o_pc shows 3.
-    assert seen == [1, 3, 3, 0x2ABC], [hex(v) for v in seen]
+    # Three-stage port latency: input register -> PCUnit -> output register.
+    assert seen == [1, 3, 3, 3, 3, 0x2ABC], [hex(v) for v in seen]
+
+
+def test_branch_target_consumes_decoder_immediates():
+    """Seam test: the decoder's imm/jump_reg fields drive BranchTarget."""
+    cases = [
+        (0x000A, isa.b_type(isa.OP_BEQ, 2, 1, -3), 0x0000),
+        (0x0064, isa.j_type(isa.OP_JAL, 9, -2), 0x0000),
+        (0x0100, isa.i_type(isa.OP_JALR, 1, 3, -1), 0x0300),
+    ]
+    h = BranchTargetHarness()
+    seen = []
+
+    async def tb(ctx):
+        for pc, word, rs1_value in cases:
+            d = isa.decode(word)
+            got = await _target(ctx, h, pc, d.imm, rs1=rs1_value,
+                                jump_reg=d.jump_reg)
+            seen.append((word, got, model_target(pc, d.imm, rs1_value,
+                                                 d.jump_reg)))
+
+    _run(h, tb)
+    for word, got, exp in seen:
+        assert got == exp, f"0x{word:05X}: {got:#06x} != {exp:#06x}"
+    assert [got for _, got, _ in seen] == [8, 99, 0x2FF]

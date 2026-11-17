@@ -28,3 +28,9 @@ Caveats that apply to every unit milestone (M0–M4):
   a passthrough variant measured ~108 LUT4; a shared SRL/SRA right-shift
   network with a fill mux measured 363 LUT4 / 120 MHz. Re-measure through the
   full flow before using either as an M9 plan.
+* M3 PC / branch target: of PcTop's 50 FFs, 34 are the measurement shell (the
+  unit is 16 LUT4 + 8 CCU2C + 16 FF); of BranchTargetTop's 65 FFs, 49 are the
+  shell (the unit is 16 LUT4 + 16 CCU2C for the two 19-bit adders). The `hold`
+  input costs no LUT: it becomes a native FF clock enable. BranchTarget builds
+  two adders although only 16 result bits are used; collapsing to one adder
+  with a muxed addend is an M5 option.
