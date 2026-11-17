@@ -180,7 +180,7 @@ class Fetch(Elaboratable):
 ## 6. Core (M5 onward)
 
 ```python
-Core(program=[...])   # words loaded into instruction memory
+Core(program=[...], data=None)   # instruction words; optional 1024-word data image
   i_rst:            Signal(1)    # synchronous active-high, drives sync.rst
   o_pc:             Signal(16)   # current fetch address
   o_retire:         Signal(1)    # one cycle per instruction leaving W
@@ -201,9 +201,13 @@ retires with `we=0` and writes nothing (M6 restores the write). `o_halt`
 asserts when the HALT instruction retires; fetching is already frozen at that
 point and the PC holds its post-HALT value.
 
-Pipeline (M5+): F (PC register, instruction EBR, FD register), D (decode,
+Pipeline (M6+): F (PC register, instruction EBR, FD register), D (decode,
 combinational regfile read, branch/jump resolution, hazard check), X (ALU,
-multiply, link value), W (register writeback). The EBR output lags the PC
+multiply, link value, LD/ST effective address), M (data EBR, load word), W
+(register writeback). The data EBR is addressed during X, so a store commits on
+the X->M edge and a load's word is on the EBR output during M; D takes a
+register written in M through an M-stage bypass (the ALU result or the load
+word), so only a distance-1 producer stalls. The EBR output lags the PC
 register by one edge and the FD register adds a second, so an instruction is
 decoded two edges after its PC became the fetch address; a taken branch or a
 jump therefore squashes the two fetch slots already in flight.
@@ -215,8 +219,10 @@ dependencies cost nothing). M6 adds the load-use interlock for the data EBR;
 M7 adds X and W forwarding so back-to-back ALU dependencies stop stalling and
 only load-use costs one bubble.
 
-M5 scope: LD/ST are no-ops (no data memory, no writeback) but still retire, so
-retire counts match the golden model's instruction count. M6 replaces them.
+LD/ST (M6): `LD rd, imm(rs1)` writes `mem[(rs1 + sign_ext(imm6)) & 0xFFFF]`,
+`ST rs2, imm(rs1)` writes the same address; addresses >= 0x400 read 0 and
+ignore writes. A load followed immediately by a consumer costs exactly one
+bubble; independent loads retire at one per cycle.
 
 Reset: the core must forward its synchronous active-high reset to the `sync`
 domain's `rst`. Unit instances (including `PCUnit` and `RegFile`) must be

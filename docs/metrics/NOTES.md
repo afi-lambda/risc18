@@ -71,3 +71,20 @@ Caveats that apply to every unit milestone (M0–M4):
 * The core owns its `sync` domain, so this is the one top that is not
   reset-less and not purely a measurement shell; FF counts include 57 shell FFs
   (11%).
+
+## M6 data memory and LD/ST
+
+* `DataMemoryTop`: 24 LUT4, 84 FF, 1 DP16KD, 261.03 MHz. `CoreTop` at M6: 1908
+  LUT4, 584 FF, **2** DP16KD (instruction + data), 1 DSP, 49.12 MHz — a further
+  drop from M5's 53.89 MHz. The critical path is still the D stage, now with
+  the M-stage bypass mux in front of the branch compare and redirect select:
+  FD register -> decoder -> operand bypass mux -> compare/redirect -> FD
+  capture mux (4.8 ns logic, 15.5 ns routing). M9 owns closure; the M6 change
+  adds one mux level to a path that was already the limit.
+* Stores are addressed combinationally from the X stage and commit on the X->M
+  edge; loads present their address in X, so the word is on the EBR output in
+  M and W captures it. That is one cycle earlier than a classic M-stage store
+  and is what makes the load-use cost exactly one bubble with an M->D bypass.
+* CPI: load-use pair 1.167 (one bubble); 10 back-to-back loads 1.000; distance-2
+  dependencies 0 bubbles (M bypass); distance-1 ALU dependencies still 1 bubble,
+  which is M7's to remove.
