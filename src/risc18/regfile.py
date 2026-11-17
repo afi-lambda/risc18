@@ -14,11 +14,13 @@ Interface and behaviour are frozen by ``docs/ISA.md`` section 5:
 * synchronous reset clears every register (the ``sync`` domain reset; all
   storage is assigned in ``m.d.sync`` so it resets to 0 automatically).
 
-Storage is an array of 16 flip-flops rather than an EBR: two asynchronous read
-ports plus a same-cycle write-through mux are not expressible on a single
-``DP16KD`` (one read port, one write port, no bypass).  The write enable is
-qualified with ``i_rd != 0``, so ``r0``'s storage is never written and synthesis
-removes those 18 flops; simulation still resets all 16 entries.
+Storage is an array of 16 flip-flops rather than an EBR: the contract requires
+the synchronous reset to clear all 16 entries in one cycle, and no RAM
+primitive (DP16KD or distributed TRELLIS_DPR16X4) has a reset.  A distributed
+RAM would otherwise fit the 2-read/1-write port pattern; it is only an option
+if the reset contract is redefined.  The write enable is qualified with
+``i_rd != 0``, so ``r0``'s storage is never written and synthesis removes those
+18 flops; simulation still resets all 16 entries.
 """
 
 from amaranth import Array, Elaboratable, Module, Signal, Mux
@@ -52,7 +54,10 @@ class RegFile(Elaboratable):
             m.d.sync += regs[self.i_rd].eq(self.i_wdata)
 
         # Read ports: purely combinational, r0 hardwired to zero, write-through
-        # bypass when the written register is the one being read.
+        # bypass when the written register is the one being read.  The
+        # ``!= 0`` terms are belt-and-braces: the output mux below is the
+        # normative r0 guard, and this term is what lets synthesis delete r0's
+        # storage.  Keep both.
         rs1_bypass = self.i_we & (self.i_rd == self.i_rs1) & (self.i_rs1 != 0)
         rs2_bypass = self.i_we & (self.i_rd == self.i_rs2) & (self.i_rs2 != 0)
 

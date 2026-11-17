@@ -49,7 +49,7 @@ tests/                  pytest suites (Amaranth simulation + golden lockstep)
 |---|---|
 | Scaffold: ISA contract, golden model, assembler, synth metrics | done |
 | M0 decoder | done |
-| M1 register file | pending |
+| M1 register file | done |
 | M2 ALU + branch compare | pending |
 | M3 PC and branches | pending |
 | M4 instruction EBR fetch | pending |

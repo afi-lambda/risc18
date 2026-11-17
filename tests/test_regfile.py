@@ -213,6 +213,7 @@ def test_write_through_both_ports_same_cycle():
     async def tb(ctx):
         await _reset(ctx, h)
         await _write(ctx, h, 7, 0x0DEAD)
+        await _write(ctx, h, 4, 0x1C3A5)   # non-matching port must stay live
         # With the write port idle both ports see the stored value.
         seen.append(await _read(ctx, h, 7, 7))
         # Write r7 while both ports read r7: same-cycle bypass on both.
@@ -240,8 +241,8 @@ def test_write_through_both_ports_same_cycle():
     _run(h, tb)
     assert seen[0] == (0x0DEAD, 0x0DEAD), seen[0]
     assert seen[1] == (0x2BEEF, 0x2BEEF), seen[1]
-    assert seen[2] == (0x2BEEF, 0), seen[2]
-    assert seen[3] == (0, 0x2BEEF), seen[3]
+    assert seen[2] == (0x2BEEF, 0x1C3A5), seen[2]
+    assert seen[3] == (0x1C3A5, 0x2BEEF), seen[3]
     assert seen[4] == (0x2BEEF, 0x2BEEF), seen[4]
 
 
@@ -269,23 +270,37 @@ def test_write_enable_low_leaves_state_unchanged():
 
 
 def test_random_sequence_against_python_model():
-    """>= 300 seeded ops, interleaved writes/reads vs a plain 16-entry model."""
+    """>= 480 seeded ops, interleaved writes, reads and read-during-write vs a
+    plain 16-entry model.  The read-during-write ops cover the bypass path."""
     rng = random.Random(0xC0FFEE)
     model = [0] * N_REGS
     script = []
-    for _ in range(360):
-        if rng.random() < 0.5:
+    for _ in range(480):
+        pick = rng.random()
+        if pick < 0.4:
             rd = rng.randrange(N_REGS)
             wdata = rng.randrange(1 << isa.WIDTH)
             script.append(("w", rd, wdata, None))
             if rd != 0:
                 model[rd] = wdata
-        else:
+        elif pick < 0.7:
             rs1 = rng.randrange(N_REGS)
             rs2 = rng.randrange(N_REGS)
             script.append(("r", rs1, rs2, (model[rs1], model[rs2])))
+        else:
+            # Same-cycle read-during-write: both ports sampled with i_we high.
+            rd = rng.randrange(N_REGS)
+            rs1 = rng.randrange(N_REGS)
+            rs2 = rng.randrange(N_REGS)
+            wdata = rng.randrange(1 << isa.WIDTH)
+            exp1 = wdata if (rd != 0 and rd == rs1) else model[rs1]
+            exp2 = wdata if (rd != 0 and rd == rs2) else model[rs2]
+            script.append(("wr", rd, (rs1, rs2, wdata), (exp1, exp2)))
+            if rd != 0:
+                model[rd] = wdata
     assert sum(1 for op in script if op[0] == "w") >= 100
     assert sum(1 for op in script if op[0] == "r") >= 100
+    assert sum(1 for op in script if op[0] == "wr") >= 80
 
     h = RegFileHarness()
     seen = []
@@ -295,8 +310,20 @@ def test_random_sequence_against_python_model():
         for kind, a, b, expected in script:
             if kind == "w":
                 await _write(ctx, h, a, b)
-            else:
+            elif kind == "r":
                 seen.append((a, b, expected, await _read(ctx, h, a, b)))
+            else:
+                rd, (rs1, rs2, wdata) = a, b
+                ctx.set(h.dut.i_rd, rd)
+                ctx.set(h.dut.i_wdata, wdata)
+                ctx.set(h.dut.i_we, 1)
+                ctx.set(h.dut.i_rs1, rs1)
+                ctx.set(h.dut.i_rs2, rs2)
+                await ctx.delay(SETTLE)
+                got = (ctx.get(h.dut.o_rs1), ctx.get(h.dut.o_rs2))
+                seen.append((rs1, rs2, expected, got))
+                await ctx.tick()
+                ctx.set(h.dut.i_we, 0)
 
     _run(h, tb)
     bad = [row for row in seen if row[3] != row[2]]
