@@ -11,13 +11,45 @@ from amaranth import ClockDomain, Elaboratable, Module, Signal
 from . import isa
 from .alu import ALU
 from .branch import BranchUnit
+from .core import Core
 from .decoder import PACK_WIDTH, Decoder, pack
 from .imem import DEPTH as IMEM_DEPTH, Fetch, InstrMemory
 from .pc import BranchTarget, PCUnit
 from .regfile import RegFile
 
-__all__ = ["AluTop", "BranchTargetTop", "BranchTop", "DecoderTop", "FetchTop",
-           "InstrMemoryTop", "PcTop", "RegFileTop"]
+__all__ = ["AluTop", "BranchTargetTop", "BranchTop", "CoreTop", "DecoderTop",
+           "FetchTop", "InstrMemoryTop", "PcTop", "RegFileTop",
+           "CORE_TOP_PROGRAM"]
+
+
+def _b(op, rs2, rs1, imm6):
+    """B/S-format word (rs2 in [13:10], rs1 in [9:6], imm6 in [5:0])."""
+    return ((op & 0xF) << 14) | ((rs2 & 0xF) << 10) | ((rs1 & 0xF) << 6) \
+        | (imm6 & 0x3F)
+
+
+#: Deterministic program for :class:`CoreTop`: ADDI, ALU add/sub/or, MUL,
+#: SHIFT (SLL and ROR), LUI, a taken BEQ that skips two words, a JAL with a
+#: link, and a HALT.  Hand-assembled from the ISA encoders so the top has no
+#: dependency on ``tools/asm.py``.
+CORE_TOP_PROGRAM = (
+    isa.i_type(isa.OP_ADDI, 1, 0, 5),               # 0: r1 = 5
+    isa.i_type(isa.OP_ADDI, 2, 0, 7),               # 1: r2 = 7
+    isa.r_type(isa.OP_ALU, isa.ALU_ADD, 3, 1, 2),   # 2: r3 = r1 + r2
+    isa.r_type(isa.OP_ALU, isa.ALU_SUB, 4, 2, 1),   # 3: r4 = r2 - r1
+    isa.r_type(isa.OP_ALU, isa.ALU_OR, 5, 3, 4),    # 4: r5 = r3 | r4
+    isa.r_type(isa.OP_MUL, 0, 6, 3, 2),             # 5: r6 = r3 * r2
+    isa.i_type(isa.OP_SHIFT, 7, 6, (isa.SHIFT_SLL << 4) | 1),   # 6: r7 = r6 << 1
+    isa.i_type(isa.OP_SHIFT, 8, 7, (isa.SHIFT_ROR << 4) | 3),   # 7: r8 = ror r7
+    isa.u_type(isa.OP_LUI, 9, 0x155),               # 8: r9 = 0x155 << 8
+    _b(isa.OP_BEQ, 1, 1, 2),                        # 9: taken -> 12
+    isa.i_type(isa.OP_ADDI, 10, 0, 1),              # 10: squashed
+    isa.i_type(isa.OP_ADDI, 10, 0, 2),              # 11: squashed
+    isa.j_type(isa.OP_JAL, 11, 1),                  # 12: link 13 -> 14
+    isa.i_type(isa.OP_ADDI, 12, 0, 3),              # 13: squashed
+    isa.i_type(isa.OP_ADDI, 13, 1, 1),              # 14: r13 = r1 + 1
+    isa.i_type(isa.OP_SYSTEM, 0, 0, isa.SYS_HALT),  # 15: HALT
+)
 
 
 def _program(depth=IMEM_DEPTH):
@@ -440,6 +472,78 @@ class FetchTop(Elaboratable):
             self.o_pc.eq(fetch.o_pc),
             self.o_instr.eq(fetch.o_instr),
             self.o_instr_pc.eq(fetch.o_instr_pc),
+        ]
+
+        return m
+
+
+class CoreTop(Elaboratable):
+    """Registered-output measurement shell around :class:`risc18.core.Core`.
+
+    The core owns the reset-bearing ``sync`` domain it drives (``Core.cd``), so
+    this top takes that domain's clock and reset signals as its own ``clk`` and
+    ``i_rst`` ports instead of declaring a second clock domain: there is
+    exactly one clock net and one reset net in the netlist, both declared, and
+    no generated ``clk$``/``rst$`` port.
+
+    The shell registers sit in a ``measure`` domain of their own, clocked and
+    reset by those same two ports.  A separate domain object is required
+    because a submodule may not redefine the domain it finds in its child (and
+    the core must own and reset its own), and it keeps the core free to be
+    dropped into another top unchanged.  This top is therefore not reset-less
+    like the unit tops -- the core it wraps is not, and a reset-less shell on a
+    reset-bearing core would only complicate the clock/reset tree.
+
+    Timing paths measured by nextpnr, on the preloaded :data:`CORE_TOP_PROGRAM`:
+
+    * PC register -> EBR address/CE -> DOA -> ``fd_*`` registers -> ALU/branch
+      logic -> ``dx_*`` registers -> ``w_*`` registers (the pipeline itself,
+      the interior register-to-register path that carries fmax);
+    * ``w_*`` registers -> RegFile read mux -> ALU -> ``dx_*`` registers (the
+      hazard/read path, four bits wide on the address compare);
+    * every core output -> its shell register -> output port.
+
+    One cycle of port-to-port latency on the outputs (the shell registers),
+    none on ``i_rst``: a reset input that was itself registered would delay the
+    synchronous reset by a cycle for no benefit.
+    """
+
+    def __init__(self, program=None):
+        self.program = list(CORE_TOP_PROGRAM if program is None else program)
+        self.core = Core(self.program)
+        # The core has no clock or reset ports of its own: the top's clk/rst
+        # ports are the core's domain signals.
+        self.clk = self.core.cd.clk
+        self.i_rst = self.core.i_rst
+        self.o_pc = Signal(16)
+        self.o_retire = Signal(1)
+        self.o_retire_pc = Signal(16)
+        self.o_retire_we = Signal(1)
+        self.o_retire_rd = Signal(4)
+        self.o_retire_value = Signal(isa.WIDTH)
+        self.o_halt = Signal(1)
+        self.ports = [self.clk, self.i_rst, self.o_pc, self.o_retire,
+                      self.o_retire_pc, self.o_retire_we, self.o_retire_rd,
+                      self.o_retire_value, self.o_halt]
+
+    def elaborate(self, platform):
+        m = Module()
+        # Shell registers: same clock, same reset, separate domain object (see
+        # the class docstring).  Registered outputs, so nextpnr measures the
+        # core's interior register-to-register paths rather than I/O paths.
+        cd = ClockDomain("measure")
+        m.domains += cd
+        m.d.comb += [cd.clk.eq(self.clk), cd.rst.eq(self.i_rst)]
+        m.submodules.core = self.core
+
+        m.d.measure += [
+            self.o_pc.eq(self.core.o_pc),
+            self.o_retire.eq(self.core.o_retire),
+            self.o_retire_pc.eq(self.core.o_retire_pc),
+            self.o_retire_we.eq(self.core.o_retire_we),
+            self.o_retire_rd.eq(self.core.o_retire_rd),
+            self.o_retire_value.eq(self.core.o_retire_value),
+            self.o_halt.eq(self.core.o_halt),
         ]
 
         return m
