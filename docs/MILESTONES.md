@@ -37,7 +37,7 @@ Rules:
 | M2 | `feat/m2-alu` | `risc18.alu.ALU` + `risc18.branch.BranchUnit` | 8 ALU ops incl. all shifts, signed compares; boundary + random vectors vs golden; metrics |
 | M3 | `feat/m3-pc-branch` | `risc18.pc.PCUnit` (PC register + next-PC mux + redirect) | sequential, branch taken/not, JAL/JALR targets, 16-bit wrap; metrics |
 | M4 | `feat/m4-imem` | `risc18.imem.InstrMemory` + fetch stage | 1-cycle registered read, enable freeze, preloaded program fetched in order, redirect next cycle; metrics |
-| M5 | `feat/m5-core` | 5-stage `risc18.core.Core` without data memory (LD/ST decode to NOP) | Arithmetic/branch/jump/LUI/shift/halt programs match golden lockstep; no forwarding stalls correct; cycle bound N+8; metrics |
+| M5 | `feat/m5-core` | 4-stage F/D/X/W `risc18.core.Core` without data memory (LD/ST decode to NOP) | Arithmetic/branch/jump/LUI/shift/halt programs match golden lockstep; no forwarding stalls correct; cycle bound N+8; metrics |
 | M6 | `feat/m6-dmem` | `risc18.dmem.DataMemory` + LD/ST in the core | Load/store programs match golden incl. memory contents; load-use interlock; out-of-range read 0/write ignored; metrics |
 | M7 | `feat/m7-forwarding` | X/M forwarding + hazard refinement | Back-to-back ALU deps execute without stalls (cycles ≤ N+6 for an N-instruction dependent chain); load-use exactly one bubble; branch flush correctness; seeded random-program lockstep (≥20 programs); metrics |
 | M8 | `feat/m8-multiplier` | MUL through the ECP5 DSP | Products match golden for edge/random operands; yosys log shows `MULT18X18D` ≥ 1; MUL result latency handled by the interlock; metrics |

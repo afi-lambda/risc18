@@ -53,7 +53,7 @@ tests/                  pytest suites (Amaranth simulation + golden lockstep)
 | M2 ALU + branch compare | done |
 | M3 PC and branches | done |
 | M4 instruction EBR fetch | done |
-| M5 core without data memory | pending |
+| M5 core without data memory | done |
 | M6 data EBR and LD/ST | pending |
 | M7 forwarding and hazards | pending |
 | M8 DSP multiplier | pending |
