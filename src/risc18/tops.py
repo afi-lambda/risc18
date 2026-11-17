@@ -9,10 +9,12 @@ first entry is the clock.
 from amaranth import ClockDomain, Elaboratable, Module, Signal
 
 from . import isa
+from .alu import ALU
+from .branch import BranchUnit
 from .decoder import PACK_WIDTH, Decoder, pack
 from .regfile import RegFile
 
-__all__ = ["DecoderTop", "RegFileTop"]
+__all__ = ["AluTop", "BranchTop", "DecoderTop", "RegFileTop"]
 
 
 class DecoderTop(Elaboratable):
@@ -131,5 +133,94 @@ class RegFileTop(Elaboratable):
             self.o_rs1.eq(regfile.o_rs1),
             self.o_rs2.eq(regfile.o_rs2),
         ]
+
+        return m
+
+
+class AluTop(Elaboratable):
+    """Registered-in / registered-out wrapper around :class:`ALU`.
+
+    Timing path measured by nextpnr: ``i_a``/``i_b``/``i_op`` -> ``*_q``
+    (port to register), then ``*_q`` -> ALU (carry chain / barrel shifter) ->
+    ``o_y`` register, which is the interior register-to-register path that
+    carries fmax.  Two cycles of port-to-port latency.  Synthesis-only: the
+    reset-less ``sync`` domain driven by ``self.clk`` leaves exactly one clock
+    port and no generated reset port in the netlist.
+    """
+
+    def __init__(self):
+        self.clk = Signal()
+        self.i_a = Signal(isa.WIDTH)
+        self.i_b = Signal(isa.WIDTH)
+        self.i_op = Signal(3)
+        self.o_y = Signal(isa.WIDTH)
+        self.ports = [self.clk, self.i_a, self.i_b, self.i_op, self.o_y]
+
+    def elaborate(self, platform):
+        m = Module()
+        cd = ClockDomain("sync", reset_less=True)
+        m.domains += cd
+        m.d.comb += cd.clk.eq(self.clk)
+        m.submodules.alu = alu = ALU()
+
+        a_q = Signal(isa.WIDTH)
+        b_q = Signal(isa.WIDTH)
+        op_q = Signal(3)
+
+        m.d.sync += [
+            a_q.eq(self.i_a),
+            b_q.eq(self.i_b),
+            op_q.eq(self.i_op),
+        ]
+        m.d.comb += [
+            alu.i_a.eq(a_q),
+            alu.i_b.eq(b_q),
+            alu.i_op.eq(op_q),
+        ]
+        m.d.sync += self.o_y.eq(alu.o_y)
+
+        return m
+
+
+class BranchTop(Elaboratable):
+    """Registered-in / registered-out wrapper around :class:`BranchUnit`.
+
+    Timing path measured by nextpnr: ``i_a``/``i_b`` -> ``*_q``, then
+    ``*_q`` -> signed comparator / condition mux -> ``o_taken`` register.
+    Two cycles of port-to-port latency, one interior register-to-register
+    path.  Synthesis-only, like the other unit tops: reset-less ``sync``
+    domain driven by ``self.clk``.
+    """
+
+    def __init__(self):
+        self.clk = Signal()
+        self.i_a = Signal(isa.WIDTH)
+        self.i_b = Signal(isa.WIDTH)
+        self.i_cond = Signal(2)
+        self.o_taken = Signal(1)
+        self.ports = [self.clk, self.i_a, self.i_b, self.i_cond, self.o_taken]
+
+    def elaborate(self, platform):
+        m = Module()
+        cd = ClockDomain("sync", reset_less=True)
+        m.domains += cd
+        m.d.comb += cd.clk.eq(self.clk)
+        m.submodules.branch = branch = BranchUnit()
+
+        a_q = Signal(isa.WIDTH)
+        b_q = Signal(isa.WIDTH)
+        cond_q = Signal(2)
+
+        m.d.sync += [
+            a_q.eq(self.i_a),
+            b_q.eq(self.i_b),
+            cond_q.eq(self.i_cond),
+        ]
+        m.d.comb += [
+            branch.i_a.eq(a_q),
+            branch.i_b.eq(b_q),
+            branch.i_cond.eq(cond_q),
+        ]
+        m.d.sync += self.o_taken.eq(branch.o_taken)
 
         return m
