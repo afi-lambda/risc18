@@ -1185,6 +1185,20 @@ def _chain_cycles(program, data=None):
     return machine, run
 
 
+def test_three_in_flight_writers_of_one_register_use_the_newest():
+    """W, M and X all write r2; the consumer must see the X-stage value."""
+    program = [
+        addi(2, 0, 1),                 # retires while the next two are in flight
+        addi(2, 0, 2),
+        addi(2, 0, 3),
+        addi(4, 2, 0),                 # must read 3, not 2 and not 1
+        halt(),
+    ]
+    machine, run = assert_lockstep(program)
+    assert run.writes() == [(0, 2, 1), (1, 2, 2), (2, 2, 3), (3, 4, 3)]
+    assert run.cycles == len(program)
+
+
 def test_distance_one_alu_chain_is_gapless():
     """add/sub/and/or chains, both operands distance 1, retire at CPI 1.0."""
     program = [
@@ -1273,6 +1287,8 @@ def test_a_branch_takes_the_direction_of_the_forwarded_alu_result():
     assert {6, 7, 9} <= set(pcs), pcs
     got = {rd: value for _, rd, value in run.writes()}
     assert got[3] == 0x3FFFD and got[7] == 7
+    # Exactly the two squash slots of the one taken branch, no dependency stall.
+    assert run.cycles == len(run.retires) + 2, run.cycles
 
 
 def test_a_store_commits_the_word_forwarded_from_the_alu():
@@ -1323,6 +1339,8 @@ def test_a_jalr_jumps_through_the_forwarded_alu_base():
     assert 7 in pcs, pcs
     got = {rd: value for _, rd, value in run.writes()}
     assert got[4] == 4 and got[7] == 7      # link value and target both right
+    # Exactly the two squash slots of the jump, no dependency stall.
+    assert run.cycles == len(run.retires) + 2, run.cycles
 
 
 def test_a_jal_link_value_is_consumed_without_a_dependency_bubble():

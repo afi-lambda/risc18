@@ -221,10 +221,10 @@ class Core(Elaboratable):
         m_hit1 = Signal()
         m_hit2 = Signal()
         m.d.comb += [
-            m_hit1.eq(xm_valid & xm_we & (xm_rd != 0) & (xm_rd == o.rs1)
-                      & d_need1),
-            m_hit2.eq(xm_valid & xm_we & (xm_rd != 0) & (xm_rd == o.rs2)
-                      & d_need2),
+            # ``xm_we`` already implies rd != 0 (it is ``d_we`` registered), so
+            # no separate rd-zero compare is needed here.
+            m_hit1.eq(xm_valid & xm_we & (xm_rd == o.rs1) & d_need1),
+            m_hit2.eq(xm_valid & xm_we & (xm_rd == o.rs2) & d_need2),
         ]
 
         # X-stage forwarding (M7).  ``x_value`` -- the ALU result, the MUL
@@ -236,10 +236,15 @@ class Core(Elaboratable):
         x_hit1 = Signal()
         x_hit2 = Signal()
         m.d.comb += [
-            x_hit1.eq(dx_valid & dx_we & ~dx_mem_read & (dx_rd != 0)
-                      & (dx_rd == o.rs1) & d_need1),
-            x_hit2.eq(dx_valid & dx_we & ~dx_mem_read & (dx_rd != 0)
-                      & (dx_rd == o.rs2) & d_need2),
+            # ``dx_we`` already implies rd != 0.  ``~dx_mem_read`` is
+            # redundant with the load-use stall below -- both use the same
+            # operand-match predicate -- and is kept only so an X-stage load
+            # never presents its effective address as data; change the two
+            # together.
+            x_hit1.eq(dx_valid & dx_we & ~dx_mem_read & (dx_rd == o.rs1)
+                      & d_need1),
+            x_hit2.eq(dx_valid & dx_we & ~dx_mem_read & (dx_rd == o.rs2)
+                      & d_need2),
         ]
 
         # rs1/rs2 as the D stage sees them: X (newest) > M > W write-through.

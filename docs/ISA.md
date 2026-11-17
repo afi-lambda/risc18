@@ -206,7 +206,7 @@ rows match `golden.Machine.trace` for every program, loads included (M6).
 `o_halt` asserts when the HALT instruction retires; fetching is already frozen
 at that point and the PC holds its post-HALT value.
 
-Pipeline (M6+): F (PC register, instruction EBR, FD register), D (decode,
+Pipeline (M7+): F (PC register, instruction EBR, FD register), D (decode,
 combinational regfile read, branch/jump resolution, hazard check), X (ALU,
 multiply, link value, LD/ST effective address), M (data EBR, load word), W
 (register writeback). The data EBR is addressed during X, so a store commits on

@@ -112,15 +112,36 @@ drop is ~2.4 MHz and any
 
 ## M7 X-stage forwarding
 
-* `CoreTop` at M7: 2265 LUT4 (+169), 584 FF, 2 DP16KD, 1 DSP, 46.55 MHz on seed
-  1 (M6: 48.56). The extra 18-bit X-vs-M-vs-regfile select on both operand
-  paths is the whole LUT growth and the 2 MHz loss; the critical path is the
-  same D-stage chain with one more select level. Quote the seed sweep before
-  drawing conclusions from the delta.
-* CPI: a 20-instruction distance-1 ALU chain went 1.85 -> 1.00; a load-use chain
-  stays at exactly one bubble per load; the CoreTop image 1.62 -> 1.31 (the
-  remainder is the two-edge squash on taken branches); a memory loop
-  1.51 -> 1.37. Independent loads remain 1.00.
+* `CoreTop` at M7: 2166 LUT4, 584 FF, 2 DP16KD, 1 DSP. fmax over seeds
+  {1,2,3,7} = 48.81 / 47.68 / 47.24 / 45.96 MHz (mean 47.42), against M6's
+  48.56 / 51.28 / 52.19 / 51.54 over the same seeds (mean 50.89): a ~3.5 MHz
+  mean drop and the ranges overlap only at their extremes, so treat it as a
+  small structural cost plus placement noise, and always quote the sweep.
+  (Dropping the redundant `rd != 0` compares from the hit terms recovered
+  ~2 MHz and ~100 LUT4 relative to the first M7 cut.)
+* The LUT growth is mostly the select: a single-line ablation (`x_hit1/2 := 0`,
+  functionally invalid, measurement only) removed 145 LUT4 and 79 PFUMX from
+  the first cut, whose remaining growth was the narrowed stall plus ABC/netlist
+  reshuffling. FF, EBR, DSP and CCU2C counts are unchanged.
+* CPI: a 20-instruction distance-1 ADDI chain went 1.90 (M6) -> 1.00 (M7,
+  tests/test_core.py::test_distance_one_alu_chain_is_gapless program); a
+  load-use chain stays at exactly one bubble per load; the `CORE_TOP_PROGRAM`
+  image 1.62 -> 1.31; the five-iteration store/load loop of
+  tests/test_core.py::test_memory_accumulation_loop 1.51 -> 1.37; independent
+  loads remain 1.00.
 * A JAL/JALR link value is never consumed at distance 1 by construction: the
   jump resolves in D and empties the two younger fetch slots, so the
   interesting case is the word after the target, which costs nothing.
+
+## What M9 must actually do
+
+Timing closure is **not** achievable by placement effort on the current D-stage
+structure. Eight PnR runs put the best total path at 19.1 ns (M6 seed 3) and
+20.8 ns (best M7) against the 16.67 ns budget of 60 MHz, and every M7 seed is
+routing-dominated (16.3-18.1 ns of routing alone, i.e. under 62 MHz even with
+zero logic). A measurement-only ablation that deletes the X select reaches
+50.93 MHz, still ~9 MHz short. M9 therefore needs a microarchitectural change,
+in order of expected value: move the branch compare/resolve out of D (it is
+the largest single block on the path: 18-bit CCU2C chain -> redirect -> FD
+capture mux), register the operand-select inputs, or add the fifth stage the
+design brief suggests. Use 19.1-23.6 ns as the observed starting range.

@@ -6,11 +6,11 @@ constraint: 60.0 MHz
 
 | resource | used | total |
 |---|---:|---:|
-| LUT4 | 2265 | 24288 |
+| LUT4 | 2166 | 24288 |
 | TRELLIS_FF | 584 | 24288 |
 | DP16KD | 2 | 56 |
 | MULT18X18D | 1 | 28 |
 
-* fmax `$glbnet$clk$TRELLIS_IO_IN`: 46.55 MHz (constraint 60.0 MHz, missed)
+* fmax `$glbnet$clk$TRELLIS_IO_IN`: 48.81 MHz (constraint 60.0 MHz, missed)
 
-* critical path: logic 4.6 ns, routing 16.9 ns
+* critical path: logic 9.2 ns, routing 11.3 ns

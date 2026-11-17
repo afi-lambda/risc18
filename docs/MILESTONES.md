@@ -41,7 +41,7 @@ Rules:
 | M6 | `feat/m6-dmem` | `risc18.dmem.DataMemory` + LD/ST in the core (M stage) | Load/store programs match golden incl. memory contents; M-stage bypass so only distance-1 stalls; load-use exactly one bubble; out-of-range read 0/write ignored; metrics |
 | M7 | `feat/m7-forwarding` | X-stage forwarding (M and W forwarding already in the M6 baseline) + load-use-only stall | Distance-1 ALU chains retire at exactly N cycles for N instructions; branch/store/JALR operands forwarded; load-use exactly one bubble; branch flush correctness; seeded random-program lockstep; metrics |
 | M8 | `feat/m8-multiplier` | MUL through the ECP5 DSP | Products match golden for edge/random operands in the suite (the cell is already inferred at M5); DSP is the only multiplier path; `MULT18X18D` = 1 in the netlist; result handling documented; metrics |
-| M9 | `feat/m9-optimization` | Timing closure + resource report | Full top with 25→60 MHz PLL, measured fmax ≥ 60 MHz (nextpnr), LUT/FF/EBR/DSP table in `docs/RESULTS.md`, critical path documented; all tests green |
+| M9 | `feat/m9-optimization` | Timing closure + resource report (microarchitectural: the M7 notes show P&R effort alone cannot reach 60 MHz) | Full top with 25→60 MHz PLL, measured fmax ≥ 60 MHz (nextpnr) after the branch-resolve/select change, LUT/FF/EBR/DSP table in `docs/RESULTS.md`, critical path documented; all tests green |
 
 ## Worker protocol
 
