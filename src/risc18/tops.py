@@ -10,8 +10,9 @@ from amaranth import ClockDomain, Elaboratable, Module, Signal
 
 from . import isa
 from .decoder import PACK_WIDTH, Decoder, pack
+from .regfile import RegFile
 
-__all__ = ["DecoderTop"]
+__all__ = ["DecoderTop", "RegFileTop"]
 
 
 class DecoderTop(Elaboratable):
@@ -68,5 +69,67 @@ class DecoderTop(Elaboratable):
         m.d.sync += instr_q.eq(self.i_instr)
         m.d.comb += decoder.i_instr.eq(instr_q)
         m.d.sync += self.o_pack.eq(pack(decoder.o))
+
+        return m
+
+
+class RegFileTop(Elaboratable):
+    """Registered-in / registered-out wrapper around :class:`RegFile`.
+
+    Timing paths measured by nextpnr:
+
+    * ``i_rs1``/``i_rs2`` -> ``rs1_q``/``rs2_q`` (port to register);
+    * ``rs1_q`` -> register file read mux -> ``o_rs1`` register
+      (the interior register-to-register path that carries fmax);
+    * ``i_rd``/``i_wdata``/``i_we`` -> ``*_q`` -> write decoder -> registers.
+
+    Two cycles of port-to-port latency.  Synthesis-only: the reset-less
+    ``sync`` domain driven by ``self.clk`` leaves exactly one clock port and no
+    generated reset port in the netlist.
+    """
+
+    def __init__(self):
+        self.clk = Signal()
+        self.i_rs1 = Signal(4)
+        self.i_rs2 = Signal(4)
+        self.i_rd = Signal(4)
+        self.i_wdata = Signal(isa.WIDTH)
+        self.i_we = Signal(1)
+        self.o_rs1 = Signal(isa.WIDTH)
+        self.o_rs2 = Signal(isa.WIDTH)
+        self.ports = [self.clk, self.i_rs1, self.i_rs2, self.i_rd, self.i_wdata,
+                      self.i_we, self.o_rs1, self.o_rs2]
+
+    def elaborate(self, platform):
+        m = Module()
+        cd = ClockDomain("sync", reset_less=True)
+        m.domains += cd
+        m.d.comb += cd.clk.eq(self.clk)
+        m.submodules.regfile = regfile = RegFile()
+
+        rs1_q = Signal(4)
+        rs2_q = Signal(4)
+        rd_q = Signal(4)
+        wdata_q = Signal(isa.WIDTH)
+        we_q = Signal(1)
+
+        m.d.sync += [
+            rs1_q.eq(self.i_rs1),
+            rs2_q.eq(self.i_rs2),
+            rd_q.eq(self.i_rd),
+            wdata_q.eq(self.i_wdata),
+            we_q.eq(self.i_we),
+        ]
+        m.d.comb += [
+            regfile.i_rs1.eq(rs1_q),
+            regfile.i_rs2.eq(rs2_q),
+            regfile.i_rd.eq(rd_q),
+            regfile.i_wdata.eq(wdata_q),
+            regfile.i_we.eq(we_q),
+        ]
+        m.d.sync += [
+            self.o_rs1.eq(regfile.o_rs1),
+            self.o_rs2.eq(regfile.o_rs2),
+        ]
 
         return m
