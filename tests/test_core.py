@@ -613,7 +613,7 @@ def _independent_program():
 
 
 def test_straight_line_retires_without_gratuitous_stalls():
-    """20 independent instructions retire in <= 26 cycles after the first."""
+    """20 independent instructions retire in exactly 20 cycles after the first."""
     program = _independent_program()
     assert len(program) == 20
     machine, run = assert_lockstep(program)

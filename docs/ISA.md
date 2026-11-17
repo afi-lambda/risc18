@@ -197,8 +197,9 @@ Core(program=[...])   # words loaded into instruction memory
 
 `o_retire` pulses once per instruction, in program order. The `o_retire_we=1`
 rows match `golden.Machine.trace` for every program without LD; in M5 an LD
-retires with `we=0` and writes nothing (M6 restores the write). `o_halt` asserts when the HALT instruction retires; fetching is already
-frozen at that point and the PC holds its post-HALT value.
+retires with `we=0` and writes nothing (M6 restores the write). `o_halt`
+asserts when the HALT instruction retires; fetching is already frozen at that
+point and the PC holds its post-HALT value.
 
 Pipeline (M5+): F (PC register, instruction EBR, FD register), D (decode,
 combinational regfile read, branch/jump resolution, hazard check), X (ALU,
