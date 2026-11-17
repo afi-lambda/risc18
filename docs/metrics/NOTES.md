@@ -44,5 +44,6 @@ Caveats that apply to every unit milestone (M0–M4):
   port to DP16KD with `REGMODE_A="NOREG"` and `CEA = en`, i.e. `en` freezes the
   EBR address register, not a fabric output register. The 5.6 ns critical path
   is EBR array access to DOA plus the destination setup — that is the F-stage
-  floor the pipeline inherits. The measurement image varies all 18 bits, so FF
-  counts are not reduced by constant folding.
+  floor the pipeline inherits. The measurement image varies 17 of 18 bits (bit
+  17 is held high so no word is zero), and every data bit maps to a live EBR
+  port, so FF counts are not reduced by constant folding.

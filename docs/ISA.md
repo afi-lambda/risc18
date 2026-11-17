@@ -170,8 +170,9 @@ class Fetch(Elaboratable):
     o_instr_pc: Signal(16)        # PC that produced o_instr
     # PCUnit drives InstrMemory; i_hold freezes both.  The instruction for a PC
     # value is present one clock edge after its PC register update (two edges
-    # counting the edge that loaded the PC).  PC >= 0x400 reads 0 (the EBR
-    # address is masked, not aliased); init is padded/truncated to 1024 words.
+    # counting the edge that loaded the PC).  PC >= 0x400 reads 0: the address
+    # is truncated to ten bits (so the EBR aliases) and a registered in-range
+    # flag masks the data to 0.  init is padded/truncated to 1024 words.
     # The cycle after reset shows o_instr = 0 with o_instr_pc = 0, which is not
     # a fetched instruction: the core must not consume it.
 ```

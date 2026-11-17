@@ -38,7 +38,7 @@ takes exactly that long too: the redirect is asserted during the cycle it is
 decoded, the target PC is current after the next edge, its instruction one edge
 after that.
 
-``i_hold`` freezes both the PC and the EBR output register (``i_en = ~i_hold``)
+``i_hold`` freezes both the PC and the EBR read path (``i_en = ~i_hold``)
 and, with it, ``o_instr_pc``, so a stalled fetch repeats the same tagged
 instruction.  ``i_redirect`` takes priority over ``i_hold`` inside
 :class:`PCUnit`; a redirect asserted while held moves the PC but keeps the

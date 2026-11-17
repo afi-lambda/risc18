@@ -11,7 +11,7 @@ M4):
 
 * ``InstrMemory``: 1024 x 18, preloaded through ``init`` (padded/truncated to
   1024 words), synchronous read with exactly one cycle of latency, ``i_en``
-  low freezes the output register, addresses ``>= 1024`` read 0, no write
+  low freezes the EBR read path, addresses ``>= 1024`` read 0, no write
   port;
 * ``Fetch``: ``PCUnit`` + ``InstrMemory``, ``o_pc`` is the fetch address,
   ``o_instr`` the EBR output tagged by ``o_instr_pc``; the instruction for a PC
@@ -59,7 +59,7 @@ def model_fetch_step(rom, state, redirect, target, hold):
 
     ``state`` is ``(pc, instr_pc, instr)`` as observed during the current
     cycle.  The EBR samples the current PC on the edge (unless held) and its
-    output register becomes the instruction for it; the tag register follows
+    EBR read path yields the instruction for it; the tag register follows
     the same rule, so ``instr_pc`` becomes the sampled PC.
     """
     pc, instr_pc, instr = state
@@ -144,7 +144,7 @@ async def _imem_read(ctx, h, addr, en=1):
 
 
 async def _imem_idle(ctx, h, addr, en=0, cycles=1):
-    """Hold the inputs without reading, to expose the output register."""
+    """Hold the inputs without reading, to expose the held read data."""
     ctx.set(h.dut.i_addr, addr)
     ctx.set(h.dut.i_en, en)
     for _ in range(cycles):
@@ -184,7 +184,7 @@ def test_memory_init_words_read_back():
 
     async def tb(ctx):
         await _reset(ctx, h)
-        # Prime the output register with a word that is not the first target.
+        # Prime the EBR read path with a word that is not the first target.
         await _imem_read(ctx, h, 512)
         for a in addrs:
             got.append(await _imem_read(ctx, h, a))
@@ -221,7 +221,7 @@ def test_read_latency_is_exactly_one_cycle():
 
 
 def test_enable_low_holds_output():
-    """``i_en = 0`` freezes the output register for several cycles."""
+    """``i_en = 0`` freezes the EBR read path for several cycles."""
     rom = [0x20000 + 7 * i for i in range(16)]
     h = ImemHarness(rom)
     seen = []
