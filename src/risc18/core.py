@@ -1,16 +1,17 @@
-"""Five-stage in-order risc18 core with data memory (M6).
+"""Five-stage in-order risc18 core with data memory and forwarding (M7).
 
 The pipeline is F/D/X/M/W, Harvard, word addressed::
 
     F: Fetch        PCUnit drives the instruction EBR; the EBR output lags
                     the PC register by one edge
     D: Decode       instruction from the FD register -> Decoder, combinational
-                    RegFile reads (write-through), M-stage bypass, immediate,
-                    branch/jump resolution (BranchUnit + BranchTarget), hazard
-                    check
+                    RegFile reads (write-through), X and M forwarding,
+                    immediate, branch/jump resolution (BranchUnit +
+                    BranchTarget), load-use hazard check
     X: Execute      ALU (a = rs1, b = imm/rs2/shift amount), 18x18 multiply,
                     the JAL/JALR link value, and the LD/ST effective address.
-                    The ALU drives the data EBR's address and write data here
+                    The ALU drives the data EBR's address and write data here,
+                    and ``x_value`` is what D forwards from
     M: Memory       the data EBR has latched the X-stage address, so a load's
                     word is on ``o_rdata``: it is captured into W and is also
                     the value the D-stage bypass presents for a consumer that
@@ -49,18 +50,22 @@ Addressing during X rather than M is deliberate: with the port addressed by a
 registered M address the word would only appear in W, and a two-instruction-
 apart consumer would need a second stall (or an M -> X forward) to see it.
 
-Hazards (no forwarding yet; M7 adds X/W forwarding): D stalls only when it
-needs a register that X is about to write (``rs1``/``rs2`` of the D instruction
-equal ``dx_rd`` with ``dx_we`` and ``rd != 0``), because a register written by
-X -- a load included -- is not in the RegFile yet.  The instruction in W writes
-through the RegFile's combinational read port in the same cycle D reads it, so
-a producer three or more instructions ahead costs nothing, and the instruction
-in M is bypassed into D (its ALU/MUL/link/LUI result, or the data EBR word for
-a load), so a producer two instructions ahead costs nothing either.  A stall
-holds ``Fetch`` (``i_hold``) and the FD register and injects a bubble into X,
-so the instruction in D is executed exactly once.  A store writes no register
-(``reg_write = 0``), so nothing ever stalls on it; a store's operands are
-ordinary reads and are stalled for on their behalf like any other.
+Hazards (M7: X > M > W forwarding; only load-use stalls): a register written
+by X -- the ALU/MUL/link/LUI result of the instruction currently executing --
+is forwarded straight into D from ``x_value``, so a distance-1 RAW costs
+nothing.  The single exception is a load: its word only appears on the data EBR
+output a cycle later, in M, so D stalls exactly once when it needs the register
+a load in X writes (``dx_mem_read``).  D takes a register written by M through
+the M-stage bypass (the ALU/MUL/link/LUI result, or the data EBR word for a
+load), and the instruction in W writes through the RegFile's combinational read
+port in the same cycle D reads it, so a producer two or three instructions
+ahead costs nothing either.  Forwarding feeds ``d_rs1``/``d_rs2`` themselves,
+so the ALU operands, the branch compare, the BranchTarget/JALR base and the
+store data all see the forwarded value.  A stall holds ``Fetch`` (``i_hold``)
+and the FD register and injects a bubble into X, so the instruction in D is
+executed exactly once.  A store writes no register (``reg_write = 0``), so
+nothing ever stalls on it; a store's operands are ordinary reads and are
+forwarded or stalled for on their behalf like any other.
 
 Control: HALT (``SYSTEM`` with ``imm6 == SYS_HALT``) is decoded in D, freezes
 ``Fetch`` there and squashes everything younger; the HALT itself still flows
@@ -159,13 +164,42 @@ class Core(Elaboratable):
 
         m.d.comb += decoder.i_instr.eq(fd_instr)
 
-        # ---- operands: RegFile read, M-stage bypass ------------------------
-        # The RegFile read port already carries the W-stage write-through.  A
-        # register written by the instruction in M is not in the RegFile yet
-        # (its write lands a cycle later), so D takes it from the M stage: the
-        # ALU/MUL/link/LUI result it carries, or the data EBR word when that
-        # instruction was a load.  A register written by X stalls D instead
-        # (below) -- that is the load-use interlock and the distance-1 RAW.
+        # ---- X stage registers (declared here: D's forwarding reads them) ---
+        dx_valid = Signal()
+        dx_pc = Signal(PC_WIDTH)
+        dx_we = Signal()
+        dx_rd = Signal(4)
+        dx_a = Signal(isa.WIDTH)
+        dx_b = Signal(isa.WIDTH)
+        dx_rs2 = Signal(isa.WIDTH)         # store data, carried to the EBR
+        dx_alu_op = Signal(3)
+        dx_imm = Signal(isa.WIDTH)
+        dx_mul = Signal()
+        dx_lui = Signal()
+        dx_link = Signal()
+        dx_halt = Signal()
+        dx_mem_read = Signal()
+        dx_mem_write = Signal()
+
+        #: X-stage result (ALU/MUL/link/LUI), driven combinationally below and
+        #: forwarded into D one instruction ahead of its writeback.
+        x_value = Signal(isa.WIDTH)
+
+        # ---- operands: RegFile read, X and M forwarding ---------------------
+        # Three producers can still be in flight in front of D:
+        #
+        #   * the RegFile read port carries the W-stage write-through (the
+        #     instruction three or more ahead), so nothing is needed there;
+        #   * M is bypassed (ALU/MUL/link/LUI result, or the data EBR word for
+        #     a load) because its RegFile write lands a cycle later;
+        #   * X is forwarded (M7): the instruction in X has already produced
+        #     its result combinationally, so D takes it straight from
+        #     ``x_value`` instead of stalling.
+        #
+        # Priority is newest first: X > M > RegFile.  The one X-stage writer
+        # whose result is *not* available is a load -- its word only appears on
+        # the data EBR output during M -- so that, and only that, still costs D
+        # a bubble (``stall`` below).
         d_need1 = Signal()
         d_need2 = Signal()
         m.d.comb += [
@@ -193,11 +227,29 @@ class Core(Elaboratable):
                       & d_need2),
         ]
 
-        d_rs1 = Signal(isa.WIDTH)          # rs1 as the D stage sees it
-        d_rs2 = Signal(isa.WIDTH)          # rs2 as the D stage sees it
+        # X-stage forwarding (M7).  ``x_value`` -- the ALU result, the MUL
+        # product, the JAL/JALR link value or the LUI immediate -- is
+        # combinational while the producer sits in X, so a consumer one
+        # instruction behind takes it directly.  A load is excluded: its
+        # ``x_value`` is the effective address, not the word, and the word
+        # only exists in M (that case stalls below and reads the M bypass).
+        x_hit1 = Signal()
+        x_hit2 = Signal()
         m.d.comb += [
-            d_rs1.eq(Mux(m_hit1, m_value, regfile.o_rs1)),
-            d_rs2.eq(Mux(m_hit2, m_value, regfile.o_rs2)),
+            x_hit1.eq(dx_valid & dx_we & ~dx_mem_read & (dx_rd != 0)
+                      & (dx_rd == o.rs1) & d_need1),
+            x_hit2.eq(dx_valid & dx_we & ~dx_mem_read & (dx_rd != 0)
+                      & (dx_rd == o.rs2) & d_need2),
+        ]
+
+        # rs1/rs2 as the D stage sees them: X (newest) > M > W write-through.
+        d_rs1 = Signal(isa.WIDTH)
+        d_rs2 = Signal(isa.WIDTH)
+        m.d.comb += [
+            d_rs1.eq(Mux(x_hit1, x_value,
+                         Mux(m_hit1, m_value, regfile.o_rs1))),
+            d_rs2.eq(Mux(x_hit2, x_value,
+                         Mux(m_hit2, m_value, regfile.o_rs2))),
             regfile.i_rs1.eq(o.rs1),
             regfile.i_rs2.eq(o.rs2),
         ]
@@ -234,26 +286,13 @@ class Core(Elaboratable):
         with m.Else():
             m.d.comb += d_b.eq(d_rs2)
 
-        # ---- hazard: D needs a register that X writes ----------------------
-        dx_valid = Signal()
-        dx_pc = Signal(PC_WIDTH)
-        dx_we = Signal()
-        dx_rd = Signal(4)
-        dx_a = Signal(isa.WIDTH)
-        dx_b = Signal(isa.WIDTH)
-        dx_rs2 = Signal(isa.WIDTH)         # store data, carried to the EBR
-        dx_alu_op = Signal(3)
-        dx_imm = Signal(isa.WIDTH)
-        dx_mul = Signal()
-        dx_lui = Signal()
-        dx_link = Signal()
-        dx_halt = Signal()
-        dx_mem_read = Signal()
-        dx_mem_write = Signal()
-
+        # ---- hazard: D needs a register only a load in X can still produce --
+        # A load's word does not exist until M (the data EBR output), so a
+        # consumer one instruction behind it is the one remaining stall.  Every
+        # other X-stage writer is forwarded above, so it costs no bubble.
         stall = Signal()
         m.d.comb += stall.eq(
-            dx_valid & dx_we
+            dx_valid & dx_we & dx_mem_read
             & ((d_need1 & (o.rs1 == dx_rd)) | (d_need2 & (o.rs2 == dx_rd)))
         )
 
@@ -335,7 +374,8 @@ class Core(Elaboratable):
             alu.i_op.eq(dx_alu_op),
         ]
 
-        x_value = Signal(isa.WIDTH)
+        # X-stage result mux: the value the writeback path carries and the
+        # value D forwards from (M7).  Driven here, declared above.
         with m.If(dx_mul):
             # Single-cycle 18x18 product, low 18 bits: signedness of the
             # operands does not affect the low bits of the product.
