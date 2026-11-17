@@ -181,28 +181,42 @@ class Fetch(Elaboratable):
 
 ```python
 Core(program=[...])   # words loaded into instruction memory
-  o_halted:  Signal(1)
-  o_pc:      Signal(16)
-  o_wb_valid:Signal(1)
-  o_wb_pc:   Signal(16)
-  o_wb_rd:   Signal(4)
-  o_wb_value:Signal(18)
+  i_rst:            Signal(1)    # synchronous active-high, drives sync.rst
+  o_pc:             Signal(16)   # current fetch address
+  o_retire:         Signal(1)    # one cycle per instruction leaving W
+  o_retire_pc:      Signal(16)   # valid with o_retire
+  o_retire_we:      Signal(1)    # high only for a real rd != 0 write
+  o_retire_rd:      Signal(4)
+  o_retire_value:   Signal(18)
+  o_halt:           Signal(1)    # sticky, set when HALT retires
+  cd:               ClockDomain("sync")   # owned by Core
 ```
 
-`o_wb_*` report one retired register write per cycle, in program order, `r0`
-writes excluded. `o_halted` asserts when the HALT instruction has retired and
-the pipeline is drained; `o_pc` then holds the PC after HALT.
+`Core` owns the `sync` domain it resets (`cd`), so an enclosing top must drive
+`cd.clk`/`cd.rst` and may not declare a second `sync` domain of its own.
 
-Pipeline (M5+): F (PC, instruction EBR), D (decode, regfile read), X (ALU,
-branch/jump resolve, address), M (data EBR access / multiply result), W
-(register writeback). Taken branches and jumps resolve in X and squash the two
-younger instructions. HALT squashes younger instructions and stops fetching
-until the pipeline drains.
+`o_retire` pulses once per instruction, in program order. The `o_retire_we=1`
+rows match `golden.Machine.trace` for every program without LD; in M5 an LD
+retires with `we=0` and writes nothing (M6 restores the write). `o_halt`
+asserts when the HALT instruction retires; fetching is already frozen at that
+point and the PC holds its post-HALT value.
 
-Hazard policy by milestone: M5 no forwarding (stall in D on any RAW operand
-dependency against X/M destinations; the write-through regfile covers W);
-M6 adds the load-use interlock; M7 adds X and M forwarding so back-to-back
-ALU dependencies no longer stall and only load-use costs one bubble.
+Pipeline (M5+): F (PC register, instruction EBR, FD register), D (decode,
+combinational regfile read, branch/jump resolution, hazard check), X (ALU,
+multiply, link value), W (register writeback). The EBR output lags the PC
+register by one edge and the FD register adds a second, so an instruction is
+decoded two edges after its PC became the fetch address; a taken branch or a
+jump therefore squashes the two fetch slots already in flight.
+
+Hazard policy by milestone: M5 no forwarding -- D stalls only when it needs a
+register that X writes, because the W-stage write is visible through the
+regfile's same-cycle write-through read (so distance-2 and distance-3
+dependencies cost nothing). M6 adds the load-use interlock for the data EBR;
+M7 adds X and W forwarding so back-to-back ALU dependencies stop stalling and
+only load-use costs one bubble.
+
+M5 scope: LD/ST are no-ops (no data memory, no writeback) but still retire, so
+retire counts match the golden model's instruction count. M6 replaces them.
 
 Reset: the core must forward its synchronous active-high reset to the `sync`
 domain's `rst`. Unit instances (including `PCUnit` and `RegFile`) must be
