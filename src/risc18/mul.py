@@ -38,8 +38,8 @@ Latency:
   (combinational, one instruction per cycle, nothing to stall);
 * ``registered=True``: ``o_y`` is the product of the operands that were
   present on the *previous* clock edge -- one edge of latency -- so a consumer
-  must hold the operators for one cycle (a one-cycle stall, the ISA's
-  "MUL 1-2 cycles" option).
+  must hold the operators for one cycle (a one-cycle stall, the "one or two
+  cycles" latitude of the design brief, not an ISA provision).
 
 Netlist evidence, read from the synthesised ``build/synth/*/top.json``:
 
@@ -55,7 +55,7 @@ SIGNEDA / SIGNEDB  0 (unsigned)       0 (unsigned)
 C0..C17            0                  0
 =================  =================  =================
 
-``P`` is 36 bits and only ``P[17:0]`` is connected, so the unused high half of
+``P`` is 36 bits; all 36 are wired to a local bus but only ``P[17:0]`` is read, so the unused high half of
 the product is dropped inside the block; ``DP16KD`` stays 0 for this unit (it
 has no memory) and no ``CCU2C``/``LUT4`` multiplier appears besides the cell's
 own fixed logic.
@@ -120,10 +120,11 @@ class Multiplier(Elaboratable):
             p_REG_PIPELINE_CLK="NONE",
             p_REG_OUTPUT_CLK="CLK0" if self.registered else "NONE",
         )
-        if self.registered:
-            # The DSP's own product register: enabled, never reset.  The
-            # consumer holds the MUL in X until the product arrives, so a
-            # stale register value is never consumed after a reset.
-            ports.update(i_CLK0=ClockSignal("sync"), i_CE0=1, i_RST0=0)
+        # CLK0/CE0/RST0 are always connected: if any REG_*_CLK is ever set the
+        # register must not be clocked by an undriven net.
+        # RST0 is 0, so the DSP's own product register is NOT cleared by the
+        # enclosing reset whereas the behavioural form is: a registered consumer
+        # must discard its first product after a reset (no user does today).
+        ports.update(i_CLK0=ClockSignal("sync"), i_CE0=1, i_RST0=0)
         m.submodules.dsp = Instance("MULT18X18D", **ports)
         m.d.comb += self.o_y.eq(p[:isa.WIDTH])

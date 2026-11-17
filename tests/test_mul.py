@@ -442,15 +442,16 @@ def test_cell_register_parameters_pick_the_internal_pipeline():
         assert re.search(r"\.i_b\(\\i_b\$\d+ ?\)", text), text[:200]
     assert '.REG_OUTPUT_CLK("NONE")' in comb
     assert '.REG_OUTPUT_CLK("CLK0")' in reg
-    # Only the registered variant wires the DSP's clock/enable/reset.
-    assert ".CLK0(clk)" in reg and ".CLK0(" not in comb
-    assert ".CE0(1'h1)" in reg and ".CE0(" not in comb
-    assert ".RST0(1'h0)" in reg and ".RST0(" not in comb
+    # Clock/enable/reset are wired in both variants, so no register input is
+    # ever driven by an undriven net if a REG_*_CLK parameter is set later.
+    assert ".CLK0(" in comb and ".CLK0(clk)" in reg
+    assert ".CE0(1'h1)" in comb and ".CE0(1'h1)" in reg
+    assert ".RST0(1'h0)" in comb and ".RST0(1'h0)" in reg
 
 
 # --- the core actually uses the unit ---------------------------------------
 
-def test_core_mul_result_comes_from_the_unit():
+def test_core_mul_result_matches_the_oracle():
     """A MUL retired by the core equals the oracle for the same operands."""
     program = [
         isa.u_type(isa.OP_LUI, 1, 0x3FF),             # r1 = 0x3FF00
@@ -484,3 +485,22 @@ def test_core_mul_result_comes_from_the_unit():
     assert got[3] == ref_mul(0x3FF00, 0x1F)
     assert got[5] == ref_mul(0x1F, 0x3FF00)
     assert got[3] == got[5]
+
+
+def test_cell_port_map_is_the_architectural_product():
+    """Every A/B/C/P pin is wired to the right bit or to zero.
+
+    The string-based checks are the only way to test the primitive (the
+    simulator drives vendor Instance outputs to 0), so they cover the whole
+    port map rather than a sample: a bit-reversed A bus or a C accumulator bit
+    set to 1 must fail here.
+    """
+    for text in (_verilog(MulTop()), _verilog(MulRegTop())):
+        for i in range(isa.WIDTH):
+            assert f".A{i}(i_a[{i}])" in text, f"A{i} not wired to i_a[{i}]"
+            assert f".B{i}(i_b[{i}])" in text, f"B{i} not wired to i_b[{i}]"
+            assert f".C{i}(1'h0)" in text, f"C{i} not zero"
+        for i in range(36):
+            assert f".P{i}(" in text, f"P{i} not wired"
+        assert ".SIGNEDA(1'h0)" in text and ".SIGNEDB(1'h0)" in text
+        assert ".SOURCEA(1'h0)" in text and ".SOURCEB(1'h0)" in text

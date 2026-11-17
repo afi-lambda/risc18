@@ -157,17 +157,24 @@ design brief suggests. Use 19.1-23.6 ns as the observed starting range.
 * `MulTop` (combinational) is 0 LUT4, 54 FF, one MULT18X18D at 141.4 MHz;
   `MulRegTop` (DSP output register, `REG_OUTPUT_CLK=CLK0`) is 0 LUT4, 54 FF, one
   MULT18X18D at 185.01 MHz. Both are pure DSP: no LUT/carry multiplier exists in
-  either netlist, and `SIGNEDA/SIGNEDB=0` with `P[17:0]` used is correct because
-  the low 18 bits do not depend on the operand signedness.
-* A registered-DSP core variant (one bubble per MUL) was built and measured in a
-  scratch tree: golden-clean on 20 seeded M7 programs plus MUL edge cases, +1
-  cycle per MUL, and 48.46 / 47.57 MHz against the baseline's 44.86 / 46.08 —
-  overlapping, i.e. no gain. The decision is the combinational form, and no
-  multiply path appears in either core's nextpnr timing report: the DSP tops
-  have ~15 ns of margin at 45 MHz.
-* `CoreTop` at M8: 2325 LUT4, 584 FF, 2 DP16KD, 1 DSP, 44.86 MHz seed 1. The
-  +159 LUT4 against M7 is mapping sensitivity, not logic: the pre-M8 core and
-  the M8 core are cell-for-cell identical at `map_gates` (8 `$alu`, 76 `$eq`,
-  59 `$mux`, 6 `$pmux`, 39 `$sdff`, 1 `MULT18X18D`, 2 `DP16KD`), and the extra
-  module level changes ABC's result. M9 should re-check area after its
-  restructure rather than blame this delta on the multiplier.
+  either netlist, and `SIGNEDA/SIGNEDB=0` with `P[17:0]` read is correct because
+  the low 18 bits do not depend on the operand signedness. This bounds the
+  multiply path at ~7.1 ns port-to-port (~5.9 ns interior) against the core's
+  ~20.5 ns critical path, i.e. >=13 ns of margin: the multiply is not, and
+  cannot become, the timing limiter.
+* The core keeps the multiply **inline** (`(dx_a * dx_b)[:18]`). Wrapping it in
+  the `Multiplier` submodule was measured to cost +159 LUT4, +166 mux cells and
+  -3.95 MHz for cell-for-cell identical logic at `map_gates` (abc9 remaps the
+  same netlist differently when module names change) — a self-inflicted cost
+  with a one-line fix, not something M9 has to inherit. `risc18.mul.Multiplier`
+  stays as the unit that the two DSP measurement tops and the registered option
+  use, and its port map is now pinned by tests.
+* A registered-DSP core variant (one bubble per MUL) was built in an uncommitted
+  scratch tree (no committed variant source, same caveat as the M2 note) and
+  verified golden-clean on 20 seeded programs plus MUL edge cases. Its measured
+  fmax (48.46 / 47.57 MHz) and the baseline's (44.86 / 46.08, before the inline
+  revert brought the baseline back to 48.81) differ by 1.5-3.6 MHz — the same
+  order as the mapping noise above, so two seeds cannot resolve it either way.
+  What the numbers do support: both variants land in the 45-48 MHz band, the
+  multiply is not the limiter (see the DSP tops), and the registered form costs
+  a bubble per MUL. Decision: combinational, no bubble.

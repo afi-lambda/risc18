@@ -72,8 +72,11 @@ Control: HALT (``SYSTEM`` with ``imm6 == SYS_HALT``) is decoded in D, freezes
 down the pipe, retires through W exactly like golden counts it, and sets
 ``o_halt`` sticky.  Nothing retires after it.
 
-MUL is a single-cycle combinational 18x18 multiply masked to 18 bits, now an
-explicit unit (:class:`risc18.mul.Multiplier`, ``registered=False``): the
+MUL is a single-cycle combinational 18x18 multiply masked to 18 bits, written
+inline so yosys maps it to one DSP without adding a module boundary (M8
+measured a +159 LUT4 / -3.95 MHz ABC remap for the equivalent submodule form).
+:class:`risc18.mul.Multiplier` exists for the DSP measurement tops and the
+registered option; the
 product is available in X, so MUL retires at CPI 1.0 and the X-stage forward
 path covers it like any other ALU result.  The unit's ``registered=True`` mode
 (one edge of latency, the DSP's own output register) needs a one-cycle X hold
@@ -105,7 +108,6 @@ from .branch import BranchUnit
 from .decoder import Decoder
 from .dmem import DataMemory
 from .imem import Fetch
-from .mul import Multiplier
 from .pc import BranchTarget
 from .regfile import RegFile
 
@@ -148,7 +150,6 @@ class Core(Elaboratable):
         m.submodules.decoder = decoder = Decoder()
         m.submodules.regfile = regfile = RegFile()
         m.submodules.alu = alu = ALU()
-        m.submodules.mul = mul = Multiplier(registered=False)
         m.submodules.branch = branch = BranchUnit()
         m.submodules.target = target = BranchTarget()
         m.submodules.dmem = dmem = DataMemory(self.data)
@@ -383,8 +384,6 @@ class Core(Elaboratable):
             alu.i_a.eq(dx_a),
             alu.i_b.eq(dx_b),
             alu.i_op.eq(dx_alu_op),
-            mul.i_a.eq(dx_a),
-            mul.i_b.eq(dx_b),
         ]
 
         # X-stage result mux: the value the writeback path carries and the
@@ -393,7 +392,7 @@ class Core(Elaboratable):
             # Single-cycle 18x18 product, low 18 bits from the explicit
             # multiplier unit (M8): signedness of the operands does not affect
             # the low bits of the product.
-            m.d.comb += x_value.eq(mul.o_y)
+            m.d.comb += x_value.eq((dx_a * dx_b)[:isa.WIDTH])
         with m.Elif(dx_link):
             # JAL/JALR link: pc + 1, the instruction after the jump.
             m.d.comb += x_value.eq(dx_pc + 1)
