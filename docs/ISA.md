@@ -212,7 +212,7 @@ multiply, link value, LD/ST effective address), M (data EBR, load word), W
 (register writeback). The data EBR is addressed during X, so a store commits on
 the X->M edge and a load's word is on the EBR output during M; D takes a
 register written in M through an M-stage bypass (the ALU result or the load
-word), so only a distance-1 producer stalls. The EBR output lags the PC
+word), so only a distance-1 load producer stalls. The EBR output lags the PC
 register by one edge and the FD register adds a second, so an instruction is
 decoded two edges after its PC became the fetch address; a taken branch or a
 jump therefore squashes the two fetch slots already in flight.
