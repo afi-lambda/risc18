@@ -316,13 +316,20 @@ def test_decoder_top_registers_input_and_pack_in_sim():
     seen = []
 
     async def tb(ctx):
+        prev = 0
         for word in words:
             ctx.set(top.i_instr, word)
-            for _ in range(2):                     # input reg, then pack reg
-                ctx.set(top.clk, 1)
-                await ctx.delay(1e-6)
-                ctx.set(top.clk, 0)
-                await ctx.delay(1e-6)
+            ctx.set(top.clk, 1)                # edge 1: capture i_instr
+            await ctx.delay(1e-6)
+            ctx.set(top.clk, 0)
+            await ctx.delay(1e-6)
+            # pack register still shows the previous instruction
+            assert ctx.get(top.o_pack) == _packed(isa.decode(prev))
+            ctx.set(top.clk, 1)                # edge 2: capture packed decode
+            await ctx.delay(1e-6)
+            ctx.set(top.clk, 0)
+            await ctx.delay(1e-6)
+            prev = word
             seen.append(ctx.get(top.o_pack))
 
     sim.add_testbench(tb)
