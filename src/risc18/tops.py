@@ -15,12 +15,13 @@ from .core import Core
 from .decoder import PACK_WIDTH, Decoder, pack
 from .dmem import DEPTH as DMEM_DEPTH, DataMemory
 from .imem import DEPTH as IMEM_DEPTH, Fetch, InstrMemory
+from .mul import Multiplier
 from .pc import BranchTarget, PCUnit
 from .regfile import RegFile
 
 __all__ = ["AluTop", "BranchTargetTop", "BranchTop", "CoreTop", "DataMemoryTop",
-           "DecoderTop", "FetchTop", "InstrMemoryTop", "PcTop", "RegFileTop",
-           "CORE_TOP_PROGRAM"]
+           "DecoderTop", "FetchTop", "InstrMemoryTop", "MulRegTop", "MulTop",
+           "PcTop", "RegFileTop", "CORE_TOP_PROGRAM"]
 
 
 def _b(op, rs2, rs1, imm6):
@@ -228,6 +229,101 @@ class AluTop(Elaboratable):
             alu.i_op.eq(op_q),
         ]
         m.d.sync += self.o_y.eq(alu.o_y)
+
+        return m
+
+
+class MulTop(Elaboratable):
+    """Registered-in / registered-out wrapper around the combinational MUL (M8).
+
+    Elaborates :class:`risc18.mul.Multiplier` with ``registered=False`` and
+    ``cell=True``, i.e. the explicit ECP5 ``MULT18X18D`` primitive, so the
+    netlist shows exactly ``MULT18X18D = 1`` with every register parameter at
+    ``NONE`` (``REG_INPUTA_CLK``/``REG_INPUTB_CLK``/``REG_PIPELINE_CLK``/
+    ``REG_OUTPUT_CLK``) and no LUT-built multiplier.
+
+    Timing path measured by nextpnr: ``i_a``/``i_b`` -> ``*_q`` (port to
+    register), then ``*_q`` -> the DSP's combinational 18x18 array -> ``o_y``
+    register, which is the interior register-to-register path that carries
+    fmax.  Two cycles of port-to-port latency.  Synthesis-only, like the other
+    unit tops (the simulator has no model for a vendor ``Instance``):
+    reset-less ``sync`` domain driven by ``self.clk``.
+    """
+
+    def __init__(self):
+        self.clk = Signal()
+        self.i_a = Signal(isa.WIDTH)
+        self.i_b = Signal(isa.WIDTH)
+        self.o_y = Signal(isa.WIDTH)
+        self.ports = [self.clk, self.i_a, self.i_b, self.o_y]
+
+    def elaborate(self, platform):
+        m = Module()
+        cd = ClockDomain("sync", reset_less=True)
+        m.domains += cd
+        m.d.comb += cd.clk.eq(self.clk)
+        m.submodules.mul = mul = Multiplier(registered=False, cell=True)
+
+        a_q = Signal(isa.WIDTH)
+        b_q = Signal(isa.WIDTH)
+
+        m.d.sync += [
+            a_q.eq(self.i_a),
+            b_q.eq(self.i_b),
+        ]
+        m.d.comb += [
+            mul.i_a.eq(a_q),
+            mul.i_b.eq(b_q),
+        ]
+        m.d.sync += self.o_y.eq(mul.o_y)
+
+        return m
+
+
+class MulRegTop(Elaboratable):
+    """Registered-in / registered-out wrapper around the pipelined MUL (M8).
+
+    Elaborates :class:`risc18.mul.Multiplier` with ``registered=True`` and
+    ``cell=True``: the product comes out of the DSP's *own* output register
+    (``REG_OUTPUT_CLK = "CLK0"``, ``CLK0`` driven by the enclosing ``sync``
+    clock, ``CE0`` high, ``RST0`` low) rather than from fabric flip-flops.
+    That is the design's "MUL 1-2 cycles" option, and it is why this top has
+    the same LUT/FF cost as :class:`MulTop` plus the one-cycle latency.
+
+    Timing paths measured by nextpnr: ``i_a``/``i_b`` -> ``*_q``; ``*_q`` ->
+    the DSP's combinational array -> the DSP's ``P`` register (inside the
+    block, ``REG_OUTPUT_CLK``); ``P`` -> the ``o_y`` register the report sees
+    as interior register-to-register.  Three cycles of port-to-port latency.
+    Synthesis-only, like the other unit tops: reset-less ``sync`` domain
+    driven by ``self.clk``.
+    """
+
+    def __init__(self):
+        self.clk = Signal()
+        self.i_a = Signal(isa.WIDTH)
+        self.i_b = Signal(isa.WIDTH)
+        self.o_y = Signal(isa.WIDTH)
+        self.ports = [self.clk, self.i_a, self.i_b, self.o_y]
+
+    def elaborate(self, platform):
+        m = Module()
+        cd = ClockDomain("sync", reset_less=True)
+        m.domains += cd
+        m.d.comb += cd.clk.eq(self.clk)
+        m.submodules.mul = mul = Multiplier(registered=True, cell=True)
+
+        a_q = Signal(isa.WIDTH)
+        b_q = Signal(isa.WIDTH)
+
+        m.d.sync += [
+            a_q.eq(self.i_a),
+            b_q.eq(self.i_b),
+        ]
+        m.d.comb += [
+            mul.i_a.eq(a_q),
+            mul.i_b.eq(b_q),
+        ]
+        m.d.sync += self.o_y.eq(mul.o_y)
 
         return m
 

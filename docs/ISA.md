@@ -225,6 +225,13 @@ the load word does not exist until M. That costs exactly one bubble;
 distance-1 ALU dependencies and every dependency at distance 2 or more cost
 nothing.
 
+MUL (M8): `rd = (rs1 * rs2)[17:0]`, computed in X by one `MULT18X18D`
+(unsigned; the low 18 bits are signedness-independent), written inline in the
+core so yosys maps it without an extra module boundary. The DSP is the only
+multiplier path; `risc18.mul.Multiplier(registered=True)` offers the DSP's own
+output register, which costs one bubble per MUL and measured no resolvable fmax
+gain, so it is a documented option rather than the default.
+
 LD/ST (M6): `LD rd, imm(rs1)` writes `mem[(rs1 + sign_ext(imm6)) & 0xFFFF]`,
 `ST rs2, imm(rs1)` writes the same address; addresses >= 0x400 read 0 and
 ignore writes. A load followed immediately by a consumer costs exactly one
