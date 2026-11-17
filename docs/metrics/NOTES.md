@@ -45,5 +45,6 @@ Caveats that apply to every unit milestone (M0–M4):
   EBR address register, not a fabric output register. The 5.6 ns critical path
   is EBR array access to DOA plus the destination setup — that is the F-stage
   floor the pipeline inherits. The measurement image varies 17 of 18 bits (bit
-  17 is held high so no word is zero), and every data bit maps to a live EBR
-  port, so FF counts are not reduced by constant folding.
+  17 is held high so no word is zero) and those 17 bits each drive a live DOA
+  port; bit 17 folds to a constant that the in-range clear gates, so FF counts
+  are still not reduced by constant folding.
