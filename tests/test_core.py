@@ -1,4 +1,4 @@
-"""Amaranth simulation tests for the M5 four-stage core (F/D/X/W, no dmem).
+"""Amaranth simulation tests for the risc18 core (M5 four-stage, M6 five-stage).
 
 Every test drives ``risc18.core.Core`` through ``amaranth.sim.Simulator``; the
 core owns its reset-bearing ``sync`` domain, so the testbench only drives
@@ -11,11 +11,15 @@ The acceptance oracle is ``risc18.golden.Machine``: the ``we=1, rd!=0`` retire
 rows must equal its ``.trace`` in order, and the number of retire pulses must
 equal ``.retired`` -- the golden model counts every instruction it executed,
 including branches, stores, NOPs and the HALT, so a lost or duplicated
-instruction cannot hide behind a register-write-only comparison.
+instruction cannot hide behind a register-write-only comparison.  For the
+load/store tests the golden model is also the *memory* oracle: its ``.mem``
+list is preloaded from the same ``data`` image handed to ``Core`` and compared
+against words read back by the program itself.
 
-M5 scope: LD/ST are no-ops (see ``test_ld_st_are_no_ops_in_m5``), so programs
-containing them are checked against a hand-written trace rather than golden,
-which does model data memory.
+M6 scope: ``LD`` writes ``rd`` from the data EBR, ``ST`` commits to it, the
+pipeline is F/D/X/M/W, and a consumer one instruction behind a load costs
+exactly one bubble (``test_load_use_interlock_costs_exactly_one_bubble``)
+while independent loads run at CPI 1.0.
 """
 
 import random
@@ -149,9 +153,9 @@ async def _drive(ctx, dut, max_cycles, post_cycles):
     return Run(retires, post, halted)
 
 
-def run_core(program, max_cycles=4000, post_cycles=8):
+def run_core(program, max_cycles=4000, post_cycles=8, data=None):
     """Run ``program`` on a :class:`Core` and return its retire trace."""
-    core = Core(program)
+    core = Core(program, data=data)
     sim = Simulator(core)
     sim.add_clock(CLK_PERIOD, domain="sync")
 
@@ -165,13 +169,22 @@ def run_core(program, max_cycles=4000, post_cycles=8):
     return holder["run"]
 
 
-def assert_lockstep(program, max_cycles=None):
+def golden_machine(program, data=None, cap=100_000):
+    """``golden.Machine`` for ``program`` with the same preloaded data image."""
+    machine = Machine(program)
+    if data:
+        preloaded = [w & isa.MASK for w in list(data)[:isa.MEM_WORDS]]
+        machine.mem[:len(preloaded)] = preloaded
+    return machine.run(cap)
+
+
+def assert_lockstep(program, max_cycles=None, data=None):
     """Compare a whole run against ``golden.Machine``; return ``(machine, run)``."""
-    machine = Machine(program).run(100_000)
+    machine = golden_machine(program, data)
     assert machine.halted, "golden model did not halt: bad test program"
     if max_cycles is None:
         max_cycles = 10 * machine.retired + 100
-    run = run_core(program, max_cycles=max_cycles)
+    run = run_core(program, max_cycles=max_cycles, data=data)
     assert run.halted, f"core did not halt in {max_cycles} cycles"
     assert run.writes() == machine.trace, _diff(run.writes(), machine.trace)
     assert len(run.retires) == machine.retired, (
@@ -507,7 +520,242 @@ def test_reset_clears_pipeline_so_first_write_is_instruction_zero():
     assert seen["rows"] == [(0, 1, 1, 21), (1, 1, 2, 22), (2, 0, 0, 0)]
 
 
-# --- M5 scope: no data memory ----------------------------------------------
+# --- M6: data memory and LD/ST ----------------------------------------------
+
+def data_image(words=isa.MEM_WORDS, mix=0x1D):
+    """Deterministic non-zero data image: bit 17 set, low bits distinct."""
+    return [0x20000 | ((i * mix) & 0x3FF) for i in range(words)]
+
+
+def test_ld_st_write_and_read_data_memory():
+    """LD writes rd from the data EBR; ST commits to it (M6 replaces M5's gap).
+
+    r2 holds 9, ``LD r2,[5]`` overwrites it with ``mem[5]`` (0: the image is
+    empty here), ``ST`` writes that back to word 5, and the following ADDI
+    proves the pipeline saw the loaded value.  Both instructions retire, and
+    only the LD produces a register write.
+    """
+    program = [
+        addi(1, 0, 5),                 # 0: address base
+        addi(2, 0, 9),                 # 1: r2 = 9
+        ld(2, 1, 0),                   # 2: r2 = mem[5] = 0
+        st(2, 1, 0),                   # 3: mem[5] = r2 = 0
+        addi(3, 2, 1),                 # 4: r3 = r2 + 1 = 1
+        halt(),                        # 5
+    ]
+    machine, run = assert_lockstep(program)
+    assert [(pc, we) for _, pc, we, _, _ in run.retires] == [
+        (0, 1), (1, 1), (2, 1), (3, 0), (4, 1), (5, 0)]
+    assert run.writes() == [(0, 1, 5), (1, 2, 9), (2, 2, 0), (4, 3, 1)]
+    assert run.writes() == machine.trace
+    assert machine.mem[5] == 0
+
+
+def test_st_then_ld_round_trip():
+    """A store and the load of the same word one instruction later."""
+    program = [
+        addi(1, 0, 0),                 # 0: base
+        nop(), nop(),                  # 1,2: distance for r1
+        addi(4, 0, 21),                # 3: r4 = 21
+        st(4, 1, 5),                   # 4: mem[5] = 21
+        ld(5, 1, 5),                   # 5: r5 = mem[5]
+        halt(),                        # 6
+    ]
+    machine, run = assert_lockstep(program)
+    assert run.writes() == [(0, 1, 0), (3, 4, 21), (5, 5, 21)] == machine.trace
+    assert machine.mem[5] == 21
+    assert [pc for _, pc, we, _, _ in run.retires if not we] == [1, 2, 4, 6]
+
+
+def test_ld_reads_a_preloaded_data_image():
+    """``Core(program, data=...)`` preloads the data EBR; LD returns its words."""
+    image = data_image()
+    program = [
+        addi(1, 0, 0),                 # 0: base 0
+        nop(), nop(),                  # 1,2
+        ld(2, 1, 0),                   # 3: image[0]
+        ld(3, 1, 1),                   # 4: image[1]
+        ld(4, 1, 31),                  # 5: image[31]
+        ld(5, 1, 30),                  # 6: image[30]
+        halt(),                        # 7
+    ]
+    machine, run = assert_lockstep(program, data=image)
+    got = {rd: value for _, rd, value in run.writes() if rd != 1}
+    assert got == {2: image[0], 3: image[1], 4: image[31], 5: image[30]}, \
+        {k: hex(v) for k, v in got.items()}
+    assert run.writes() == machine.trace
+
+
+def test_ld_st_base_plus_offset_including_negative_offsets():
+    """The effective address is rs1 + sext(imm6): negative offsets and wrap."""
+    image = data_image()
+    program = [
+        lui(1, 0x001),                 # 0: base 0x100
+        nop(), nop(),                  # 1,2
+        addi(4, 0, 7),                 # 3: r4 = 7
+        st(4, 1, -1),                  # 4: mem[0x0FF] = 7
+        st(4, 1, 5),                   # 5: mem[0x105] = 7
+        ld(5, 1, -1),                  # 6: r5 = mem[0x0FF]
+        ld(6, 1, 5),                   # 7: r6 = mem[0x105]
+        ld(7, 1, 0),                   # 8: r7 = mem[0x100] (image word)
+        halt(),                        # 9
+    ]
+    machine, run = assert_lockstep(program, data=image)
+    got = {rd: value for _, rd, value in run.writes()}
+    assert got[1] == 0x100 and got[4] == 7
+    assert got[5] == 7 and got[6] == 7, (hex(got[5]), hex(got[6]))
+    assert got[7] == image[0x100], hex(got[7])
+    assert machine.mem[0x0FF] == machine.mem[0x105] == 7
+    assert run.writes() == machine.trace
+
+
+def test_ld_out_of_range_reads_zero():
+    """Loads outside 0x0000..0x03FF return 0, never an aliased word."""
+    image = data_image()
+    program = [
+        lui(1, 0x00F),                 # 0: base 0xF00 -- outside the memory
+        nop(), nop(),                  # 1,2
+        ld(2, 1, 0),                   # 3: 0
+        ld(3, 1, 17),                  # 4: 0
+        ld(4, 0, 31),                  # 5: in range, image[31]
+        addi(9, 0, 0),                 # 6
+        ld(5, 9, 0),                   # 7: image[0]
+        halt(),                        # 8
+    ]
+    machine, run = assert_lockstep(program, data=image)
+    got = {rd: value for _, rd, value in run.writes()}
+    assert got[2] == 0 and got[3] == 0, (hex(got[2]), hex(got[3]))
+    assert got[4] == image[31] and got[5] == image[0]
+    assert run.writes() == machine.trace
+
+
+def test_st_out_of_range_is_ignored():
+    """Stores outside the memory change nothing, not even the aliased word."""
+    image = data_image()
+    program = [
+        lui(1, 0x00F),                 # 0: base 0xF00 (aliases word 0)
+        nop(), nop(),                  # 1,2
+        addi(4, 0, 13),                # 3
+        st(4, 1, 0),                   # 4: ignored
+        st(4, 1, 7),                   # 5: ignored
+        ld(5, 0, 0),                   # 6: word 0 is still the image word
+        halt(),                        # 7
+    ]
+    machine, run = assert_lockstep(program, data=image)
+    got = {rd: value for _, rd, value in run.writes()}
+    assert got[5] == image[0], hex(got[5])
+    assert machine.mem[0] == image[0]
+    assert machine.mem[7] == image[7]
+    assert all(machine.mem[i] == image[i] for i in range(isa.MEM_WORDS))
+
+
+def test_ld_to_r0_writes_nothing():
+    """``LD r0`` reads the word but retires with ``we = 0`` and changes no r0."""
+    image = data_image()
+    program = [
+        addi(1, 0, 3),                 # 0: base
+        nop(), nop(),                  # 1,2
+        ld(0, 1, 4),                   # 3: read, discard
+        ld(0, 0, 9),                   # 4: read image[9], discard
+        addi(2, 0, 1),                 # 5: prove r0 still reads 0
+        halt(),                        # 6
+    ]
+    machine, run = assert_lockstep(program, data=image)
+    assert run.writes() == [(0, 1, 3), (5, 2, 1)] == machine.trace
+    rows = {pc: (we, rd) for _, pc, we, rd, _ in run.retires}
+    assert rows[3] == (0, 0) and rows[4] == (0, 0), rows
+    # The load result is still visible on the retire port, it just writes nothing.
+    values = {pc: value for _, pc, _, _, value in run.retires}
+    assert values[3] == image[7] and values[4] == image[9], \
+        (hex(values[3]), hex(values[4]))
+
+
+def test_store_load_at_distances_one_two_and_three():
+    """ST -> LD back at distance 1, 2 and 3: no stall buys correctness."""
+    image = data_image()
+    for gap in (0, 1, 2):
+        program = [
+            addi(1, 0, 0),             # 0: base
+            nop(), nop(),              # 1,2
+            addi(4, 0, 20 + gap),      # 3: value (imm6 stays positive)
+            st(4, 1, 7),               # 4: mem[7] = value
+        ]
+        program += [nop()] * gap
+        program += [ld(5, 1, 7), halt()]      # distance 1/2/3 from the store
+        machine, run = assert_lockstep(program, data=image)
+        want = 20 + gap
+        got = {rd: value for _, rd, value in run.writes()}
+        assert got[5] == want, (gap, hex(got[5]))
+        assert machine.mem[7] == want, (gap, machine.mem[7])
+        assert machine.mem[8] == image[8]
+        assert run.writes() == machine.trace
+
+
+def test_memory_accumulation_loop_matches_golden():
+    """A five-iteration loop that stores through r3 and accumulates the loads."""
+    program = [
+        addi(1, 0, 0),                 # 0: address pointer
+        addi(2, 0, 0),                 # 1: accumulator
+        addi(3, 0, 3),                 # 2: value stored every pass
+        addi(6, 0, -5),                # 3: iteration counter
+        st(3, 1, 0),                   # 4: mem[ptr] = 3
+        ld(4, 1, 0),                   # 5: r4 = mem[ptr]
+        alu(isa.ALU_ADD, 2, 2, 4),     # 6: acc += r4
+        addi(1, 1, 1),                 # 7: ptr++
+        addi(6, 6, 1),                 # 8: counter++
+        br(isa.OP_BNE, 6, 0, -6),      # 9: back to word 4 while != 0
+        halt(),                        # 10
+    ]
+    machine, run = assert_lockstep(program)
+    assert machine.retired == 4 + 5 * 6 + 1      # prologue + loop + HALT
+    sums = [value for _, rd, value in run.writes() if rd == 2]
+    assert sums[-1] == 15, sums                 # 5 x 3
+    assert machine.mem[:5] == [3] * 5
+    assert machine.mem[5] == 0
+    assert run.writes() == machine.trace
+
+
+def test_whole_data_memory_matches_golden_after_the_program():
+    """Read all 1024 words back with LD and compare them byte-exactly.
+
+    The program stores two words through the data EBR, then walks the whole
+    memory with ``LD r5,[ptr]``; the retire values of that load are the memory
+    image as the RTL sees it, so the comparison covers every word -- the ones
+    the program wrote, the ones it only read and the ones nothing touched.
+    """
+    image = data_image()
+    program = [
+        lui(1, 0x003),                 # 0: r1 = 0x300
+        nop(), nop(),                  # 1,2
+        addi(2, 0, 7),                 # 3
+        st(2, 1, 5),                   # 4: mem[0x305] = 7
+        addi(3, 0, -1),                # 5: r3 = 0x3FFFF
+        st(3, 1, 0),                   # 6: mem[0x300] = 0x3FFFF
+        addi(4, 0, 0),                 # 7: read pointer
+        lui(6, 0x004),                 # 8: counter = 1024
+        ld(5, 4, 0),                   # 9: <- readback loop
+        addi(6, 6, -1),                # 10
+        addi(4, 4, 1),                 # 11
+        br(isa.OP_BNE, 6, 0, -4),      # 12: back to word 9 while != 0
+        halt(),                        # 13
+    ]
+    max_cycles = 20_000
+    machine, run = assert_lockstep(program, max_cycles=max_cycles, data=image)
+    readback = [value for _, pc, we, rd, value in run.retires if pc == 9]
+    assert len(readback) == isa.MEM_WORDS, len(readback)
+    assert readback == machine.mem, _first_mem_diff(readback, machine.mem)
+    # The two stores are visible, and the rest of the image is the preload.
+    assert readback[0x305] == 7 and readback[0x300] == 0x3FFFF
+    assert [readback[i] for i in range(0, 0x300)] == \
+        [image[i] for i in range(0, 0x300)]
+
+
+def _first_mem_diff(got, want):
+    for i, (a, b) in enumerate(zip(got, want)):
+        if a != b:
+            return f"word {i:#05x}: got {a:#07x}, want {b:#07x}"
+    return f"{len(got)} vs {len(want)} words"
+
 
 def test_mid_run_reset_restarts_the_program_cleanly():
     """A reset pulse mid-program replays the run from PC 0 with no stale state."""
@@ -555,28 +803,56 @@ def test_mid_run_reset_restarts_the_program_cleanly():
     assert runs[1] == runs[0], runs[1]
 
 
-def test_ld_st_are_no_ops_in_m5():
-    """M5 has no data memory: LD/ST retire but write nothing and touch nothing.
+def test_memory_survives_a_reset_inside_the_core():
+    """Reset clears the pipeline and the registers, never the data EBR.
 
-    This is the documented M5 gap -- ``LD`` would write ``rd`` and ``ST`` would
-    write memory from M6 on.  Here both decode to no-ops: LD leaves its target
-    register untouched (r2 stays 9), ST writes no memory, neither stalls and
-    neither can hang the pipeline.  M6 replaces this behaviour.
+    The program increments ``mem[9]`` and halts; a reset pulse then replays it,
+    so the second run must read the value the first one left behind.
     """
     program = [
-        addi(1, 0, 5),                 # 0: address base
-        addi(2, 0, 9),                 # 1: r2 = 9
-        ld(2, 1, 0),                   # 2: M5 no-op (M6: r2 = mem[5])
-        st(2, 1, 0),                   # 3: M5 no-op (M6: mem[5] = 9)
-        addi(3, 2, 1),                 # 4: 10 -> r2 still holds 9
-        halt(),                        # 5
+        ld(1, 0, 9),                   # 0: r1 = mem[9]
+        addi(2, 1, 1),                 # 1: r2 = mem[9] + 1
+        st(2, 0, 9),                   # 2: mem[9] = mem[9] + 1
+        halt(),                        # 3
     ]
-    run = run_core(program)
-    assert run.halted, "LD/ST must not hang the M5 pipeline"
-    assert len(run.retires) == len(program)
-    assert [(pc, we) for _, pc, we, _, _ in run.retires] == [
-        (0, 1), (1, 1), (2, 0), (3, 0), (4, 1), (5, 0)]
-    assert run.writes() == [(0, 1, 5), (1, 2, 9), (4, 3, 10)]
+    core = Core(program)                  # mem[9] starts at 0: increments 0,1,2
+    runs = []
+    sim = Simulator(core)
+    sim.add_clock(CLK_PERIOD, domain="sync")
+
+    async def one_run(ctx):
+        ctx.set(core.i_rst, 1)
+        for _ in range(2):
+            await ctx.tick()
+        ctx.set(core.i_rst, 0)
+        rows = []
+        for _ in range(60):
+            await ctx.tick()
+            await ctx.delay(SETTLE)
+            if ctx.get(core.o_retire):
+                rows.append((ctx.get(core.o_retire_pc),
+                             ctx.get(core.o_retire_we),
+                             ctx.get(core.o_retire_rd),
+                             ctx.get(core.o_retire_value)))
+            if ctx.get(core.o_halt):
+                break
+        return rows
+
+    async def tb(ctx):
+        runs.append(await one_run(ctx))
+        runs.append(await one_run(ctx))
+        runs.append(await one_run(ctx))
+
+    sim.add_testbench(tb)
+    sim.run()
+
+    # Every run increments by one: the EBR contents outlive the reset, the
+    # register file's r1 does not.
+    for i, rows in enumerate(runs):
+        writes = [(pc, rd, value) for pc, we, rd, value in rows if we and rd]
+        assert writes == [(0, 1, i), (1, 2, i + 1)], (i, writes)
+    assert runs[0][0][0] == 0 and runs[0][-1][0] == 3
+    assert all(len(rows) == 4 for rows in runs)
 
 
 # --- cycle accounting -------------------------------------------------------
@@ -632,6 +908,259 @@ def test_dependent_chain_stalls_at_most_once_per_dependency():
     assert len(run.retires) == machine.retired == 12
     # 12 instructions + one bubble per dependency (11 writes, 10 dependencies).
     assert run.cycles == len(program) + dependencies, run.cycles
+
+
+# --- M6: load-use interlock and store behaviour -----------------------------
+
+def test_load_use_interlock_costs_exactly_one_bubble():
+    """``LD rX,[rY]`` followed by a consumer costs exactly one bubble."""
+    program = [
+        addi(1, 0, 0),                 # 0: base
+        nop(), nop(),                  # 1,2: keep r1 out of the X stage
+        ld(2, 1, 0),                   # 3: load
+        addi(3, 2, 1),                 # 4: consumer, distance 1
+        halt(),                        # 5
+    ]
+    machine, run = assert_lockstep(program, data=data_image())
+    assert len(run.retires) == machine.retired == 6
+    assert run.cycles == len(program) + 1, run.cycles
+    assert run.writes() == [(0, 1, 0), (3, 2, 0x20000), (4, 3, 0x20001)]
+
+    # Four independent LD/consumer pairs: four bubbles, never more.
+    program = [addi(1, 0, 0), nop(), nop()]
+    for k in range(4):
+        program += [ld(2, 1, k), addi(3, 2, 1)]
+    program.append(halt())
+    machine, run = assert_lockstep(program, data=data_image())
+    assert len(run.retires) == machine.retired == len(program)
+    assert run.cycles == len(program) + 4, run.cycles
+    # CPI = cycles / instructions: 1.33 for one bubble in every four.
+    assert round(run.cycles / len(run.retires), 3) == 1.333
+
+
+def test_independent_loads_pipeline_at_cpi_one():
+    """Ten loads with no consumer between them retire without a single stall."""
+    image = data_image()
+    program = [addi(1, 0, 0), nop(), nop()]
+    program += [ld(2 + k, 1, k) for k in range(10)]
+    program.append(halt())
+    machine, run = assert_lockstep(program, data=image)
+    assert len(run.retires) == machine.retired == len(program)
+    assert run.cycles == len(program), f"{run.cycles} cycles for {len(program)}"
+    assert run.cycles / len(run.retires) == 1.0
+    loaded = [value for _, pc, we, rd, value in run.retires if 3 <= pc < 13]
+    assert loaded == [image[k] for k in range(10)], [hex(v) for v in loaded]
+    assert run.writes() == machine.trace
+
+
+def test_store_after_a_load_use_stall_commits_the_bypassed_word():
+    """A store held in D while its source load stalls must still commit data."""
+    program = [
+        addi(2, 0, 0x10),              # base A (imm6 is 6-bit signed)
+        addi(3, 0, 0x1F),              # base B (largest positive imm6)
+        ld(1, 2, 0),                   # r1 = data[0x10]
+        st(1, 3, 0),                   # st stalls in D while the load is in X
+        ld(4, 3, 0),                   # read back 0x1F
+        halt(),
+    ]
+    data = [0] * 1024
+    data[0x10] = 0x12345
+    machine = Machine(program)
+    machine.mem[:] = data[:]
+    machine.run(4000)
+    assert machine.halted
+    run = run_core(program, data=data)
+    assert run.halted
+    assert run.writes() == machine.trace, _diff(run.writes(), machine.trace)
+    assert len(run.retires) == machine.retired
+    assert (4, 4, 0x12345) in run.writes()
+
+
+def test_two_consecutive_stores_to_one_word_last_wins():
+    program = [
+        addi(2, 0, 0x10),
+        addi(1, 0, 7),
+        addi(4, 0, 9),
+        st(1, 2, 0),
+        st(4, 2, 0),
+        ld(3, 2, 0),
+        halt(),
+    ]
+    machine, run = assert_lockstep(program)
+    assert run.writes()[-1] == (5, 3, 9)
+
+
+def test_store_in_the_second_squash_slot_does_not_commit():
+    """BEQ over two words: neither the slot-1 nor the slot-2 store lands."""
+    program = [
+        br(isa.OP_BEQ, 1, 1, 2),       # taken: 0 -> 3
+        st(1, 0, 4),                   # slot 1, squashed
+        st(1, 0, 5),                   # slot 2, squashed
+        ld(2, 0, 4),                   # reads data[4], untouched
+        ld(3, 0, 5),                   # reads data[5], untouched
+        halt(),
+    ]
+    data = [0] * 1024
+    data[4] = 0x2AAAA
+    data[5] = 0x15555
+    machine = Machine(program)
+    machine.mem[:] = data[:]
+    machine.run(4000)
+    run = run_core(program, data=data)
+    assert run.writes() == machine.trace, _diff(run.writes(), machine.trace)
+    assert run.writes()[-2] == (3, 2, 0x2AAAA)
+    assert run.writes()[-1] == (4, 3, 0x15555)
+
+
+def test_reset_on_the_stores_x_cycle_does_not_commit_it():
+    """A store whose X cycle is a reset cycle must not reach memory.
+
+    The program is 27 NOPs followed by ``ld r1,[9] / addi r2,r1,1 / st r2,[9] /
+    ld r3,[9]``.  The store is word 29; the cycles are calibrated from an
+    undisturbed run (the store retires two cycles after its X cycle), so the
+    test does not hard-code the pipeline depth.  A one-cycle reset while the
+    store is in X discards it, so the replay's first load sees 0, its store
+    writes 1 and the final ``ld r3,[9]`` retires 1.  Without the reset gate the
+    store commits anyway: the replay loads 1, stores 2, the final load retires
+    2.
+    """
+    program = [nop() for _ in range(27)] + [
+        ld(1, 0, 9),
+        addi(2, 1, 1),
+        st(2, 0, 9),
+        ld(3, 0, 9),
+        halt(),
+    ]
+    assert len(program) == 32
+
+    def run(reset_cycle=None):
+        core = Core(program, data=[0] * 1024)
+        seen = {}
+
+        sim = Simulator(core)
+        sim.add_clock(CLK_PERIOD, domain="sync")
+
+        async def tb(ctx):
+            rows = []
+            ctx.set(core.i_rst, 1)
+            await ctx.tick()
+            await ctx.delay(SETTLE)
+            ctx.set(core.i_rst, 0)
+            for cycle in range(1, 300):
+                if cycle == reset_cycle:
+                    ctx.set(core.i_rst, 1)
+                    await ctx.tick()
+                    await ctx.delay(SETTLE)
+                    ctx.set(core.i_rst, 0)
+                    continue
+                await ctx.tick()
+                await ctx.delay(SETTLE)
+                if ctx.get(core.o_retire):
+                    rows.append((cycle, ctx.get(core.o_retire_pc),
+                                 ctx.get(core.o_retire_we),
+                                 ctx.get(core.o_retire_rd),
+                                 ctx.get(core.o_retire_value)))
+                if ctx.get(core.o_halt):
+                    break
+            seen["rows"] = rows
+
+        sim.add_testbench(tb)
+        sim.run()
+        return seen["rows"]
+
+    def final_load(rows):
+        loads = [r for r in rows if r[1] == 30 and r[2]]
+        assert loads, rows
+        return loads[-1][4]
+
+    reference = run()
+    store_retire = [r[0] for r in reference if r[1] == 29]
+    assert len(store_retire) == 1, store_retire
+    commit = store_retire[0]           # retire cycle: already in the array
+
+    assert final_load(run(commit - 2)) == 1   # well before the commit
+    assert final_load(run(commit - 1)) == 1   # on its X cycle: discarded
+    assert final_load(run(commit)) == 2       # already committed: survives
+
+
+def test_store_never_stalls_a_follower_on_its_rs2_field():
+    """A store writes no register, so it can never cause a RAW stall.
+
+    The S-format word puts ``rs2`` in the rd field the decoder reports, so a
+    naive hazard check on ``rd`` would stall the instruction that reads that
+    register one cycle after the store.  A store's ``dx_we`` is 0, so nothing
+    stalls and the retire stream stays gapless.
+    """
+    program = [
+        addi(1, 0, 0),                 # 0: base
+        addi(4, 0, 9),                 # 1: store data
+        nop(),                         # 2: keep r4 out of X for the store
+        st(4, 1, 5),                   # 3: mem[5] = 9, "rd" field == r4
+        addi(2, 4, 1),                 # 4: reads r4 one behind: must not stall
+        nop(),                         # 5
+        st(4, 1, 6),                   # 6: back-to-back store, same data
+        addi(3, 4, 2),                 # 7: reads r4 one behind: must not stall
+        halt(),                        # 8
+    ]
+    machine, run = assert_lockstep(program)
+    assert len(run.retires) == machine.retired == 9
+    assert run.cycles == 9, f"{run.cycles} cycles: a store stalled the pipeline"
+    assert run.writes() == [(0, 1, 0), (1, 4, 9), (4, 2, 10), (7, 3, 11)] \
+        == machine.trace
+    assert machine.mem[5] == 9 and machine.mem[6] == 9
+
+
+def test_squashed_store_never_writes_memory():
+    """A store in a squashed fetch slot must not reach the data EBR."""
+    image = data_image()
+    program = [
+        addi(1, 0, 0),                 # 0: base
+        nop(), nop(),                  # 1,2
+        addi(4, 0, 13),                # 3
+        br(isa.OP_BEQ, 4, 4, 1),       # 4: taken, skips word 5
+        st(4, 1, 6),                   # 5: squashed: must not write
+        ld(5, 1, 6),                   # 6: still the preloaded word
+        st(4, 1, 7),                   # 7: this one executes
+        halt(),                        # 8
+    ]
+    machine, run = assert_lockstep(program, data=image)
+    assert 5 not in [pc for _, pc, _, _, _ in run.retires]
+    assert machine.mem[6] == image[6], hex(machine.mem[6])
+    assert machine.mem[7] == 13
+    assert {rd: value for _, rd, value in run.writes()}[5] == image[6]
+
+
+def test_load_feeds_control_transfer_resolution():
+    """A load's word drives the D-stage branch compare and a JALR target.
+
+    Both consumers sit one instruction behind their load, so they exercise the
+    interlock and the M-stage bypass on the control path: the branch is taken
+    because of the loaded word, and the JALR jumps through a loaded register.
+    """
+    image = data_image()
+    program = [
+        addi(1, 0, 0),                 # 0: base
+        addi(9, 0, 3),                 # 1: value 3
+        st(9, 1, 2),                   # 2: mem[2] = 3
+        nop(),                         # 3
+        ld(2, 1, 0),                   # 4: r2 = image[0] (non-zero)
+        br(isa.OP_BNE, 2, 0, 2),       # 5: taken because of the load
+        addi(5, 0, 1),                 # 6: squashed
+        addi(5, 0, 2),                 # 7: squashed
+        ld(3, 1, 2),                   # 8: r3 = 3
+        jalr(4, 3, 8),                 # 9: -> 11, link 10
+        addi(6, 0, 1),                 # 10: squashed
+        addi(7, 0, 7),                 # 11: the indirect target
+        halt(),                        # 12
+    ]
+    machine, run = assert_lockstep(program, data=image)
+    pcs = [pc for _, pc, _, _, _ in run.retires]
+    assert not {6, 7, 10} & set(pcs), pcs
+    assert {8, 11} <= set(pcs)
+    got = {rd: value for _, rd, value in run.writes()}
+    assert got[2] == image[0] and got[3] == 3
+    assert got[4] == 10 and got[7] == 7          # JALR link value
+    assert run.writes() == machine.trace
 
 
 # --- seeded random lockstep -------------------------------------------------
@@ -730,6 +1259,157 @@ def test_seeded_random_programs_lockstep_with_golden():
     assert total_writes >= 200, total_writes
     print(f"fuzz: {programs} programs, {total_instr} instructions, "
           f"{total_writes} compared writes")
+
+
+# --- seeded random lockstep with LD/ST --------------------------------------
+
+#: Registers the load/store fuzz generator reserves for address bases.
+STORE_BASE = 14      # 0: stores land in words 0..31 (the readback window)
+MID_BASE = 13        # 0x100: in-range loads away from the window
+HIGH_BASE = 12       # 0xF00: out-of-range loads (must read 0)
+JALR_BASE = 15       # the JALR target word
+
+READBACK_WORDS = 32
+
+
+def _random_mem_program(rng, n, target_base):
+    """``n`` body words with LD/ST from the M6 subset, then a readback loop.
+
+    Layout: 0..2 set the three address bases, 3..n-2 are random instructions,
+    ``n - 1`` is a JAL into the epilogue that starts at word ``n``, and the
+    epilogue reads words 0..31 back through ``LD`` and halts.  The body can
+    only leave through that JAL (every branch and jump target stays inside
+    ``0..n-1``), and the epilogue holds the only HALT, so a golden run that
+    halts necessarily walked the whole readback loop.
+
+    Register roles: r12 = 0xF00, r13 = 0x100, r14 = 0, r15 = ``target_base``.
+    The body never writes r12..r15, and stores only use r14 with an imm6 in
+    ``0..31``, so every word the program can write lies in the readback window.
+    """
+    program = [
+        addi(JALR_BASE, 0, target_base),        # 0
+        lui(MID_BASE, 0x001),                   # 1: r13 = 0x100
+        lui(HIGH_BASE, 0x00F),                  # 2: r12 = 0xF00
+    ]
+    for pc in range(3, n - 1):
+        kind = rng.choices(
+            ["addi", "alu", "andi", "ori", "mul", "shift", "lui", "jal",
+             "jalr", "branch", "nop", "ld", "st"],
+            weights=[16, 14, 5, 5, 6, 9, 4, 4, 3, 18, 4, 12, 8])[0]
+        rd = rng.randrange(12)                  # r12..r15 are the bases
+        rs1 = rng.randrange(16)
+        rs2 = rng.randrange(16)
+        if kind == "addi":
+            program.append(addi(rd, rs1, rng.randrange(64)))
+        elif kind == "alu":
+            program.append(alu(rng.randrange(4), rd, rs1, rs2))
+        elif kind == "andi":
+            program.append(andi(rd, rs1, rng.randrange(64)))
+        elif kind == "ori":
+            program.append(ori(rd, rs1, rng.randrange(64)))
+        elif kind == "mul":
+            program.append(mul(rd, rs1, rs2))
+        elif kind == "shift":
+            program.append(shift(rd, rs1, rng.randrange(4), rng.randrange(16)))
+        elif kind == "lui":
+            program.append(lui(rd, rng.randrange(1024)))
+        elif kind == "jal":
+            off = rng.choice([-4, -3, -2, -1, 1, 2, 3, 4, 5, 6])
+            target = pc + 1 + off
+            if not 0 <= target <= n - 1:
+                target = pc + 1
+            program.append(jal(rd, (target - (pc + 1)) & 0x3FF))
+        elif kind == "jalr":
+            off = rng.choice([-1, 0, 1])
+            if 0 <= target_base + off <= n - 1:
+                program.append(jalr(rd, JALR_BASE, off & 0x3F))
+            else:
+                program.append(nop())
+        elif kind == "branch":
+            off = rng.choice([-4, -3, -2, -1, 1, 2, 3, 4, 5, 6])
+            target = pc + 1 + off
+            if not 0 <= target <= n - 1:
+                target = pc + 1
+            program.append(br(rng.choice([isa.OP_BEQ, isa.OP_BNE, isa.OP_BLT,
+                                          isa.OP_BGE]), rs1, rs2,
+                              (target - (pc + 1)) & 0x3F))
+        elif kind == "ld":
+            base = rng.choice([STORE_BASE, MID_BASE, HIGH_BASE])
+            program.append(ld(rd, base, rng.randrange(32)))
+        elif kind == "st":
+            program.append(st(rs2, STORE_BASE, rng.randrange(32)))
+        else:
+            program.append(nop())
+    program.append(jal(0, 0))                   # n - 1: enter the epilogue
+
+    readback_pc = n + 2
+    program += [
+        addi(7, 0, 0),                          # n: read pointer
+        addi(6, 0, -READBACK_WORDS),            # n+1: count -32 -> 0
+        ld(1, 7, 0),                            # n+2: <- readback loop
+        addi(6, 6, 1),                          # n+3
+        addi(7, 7, 1),                          # n+4
+        br(isa.OP_BNE, 6, 0, -4),               # n+5: back to n+2
+        halt(),                                 # n+6
+    ]
+    return program, readback_pc
+
+
+def test_seeded_random_programs_with_loads_and_stores_lockstep():
+    """>= 20 random LD/ST programs: register trace and memory both match golden."""
+    rng = random.Random(0x51AC)
+    image = data_image(mix=0x35)
+    programs = 0
+    attempts = 0
+    total_writes = 0
+    total_instr = 0
+    total_loads = 0
+    total_stores = 0
+    while programs < 20 and attempts < 400:
+        attempts += 1
+        n = rng.randint(34, 64)
+        target_base = rng.randrange(min(n - 1, 31) + 1)
+        program, readback_pc = _random_mem_program(rng, n, target_base)
+        body = [isa.decode(word) for word in program[:n]]
+        if not any(d.mem_read for d in body) or not any(d.mem_write
+                                                        for d in body):
+            continue
+
+        machine = golden_machine(program, image, cap=8000)
+        if not machine.halted:
+            continue                        # data-dependent loop: draw again
+        if machine.retired < 40 or len(machine.trace) < 5:
+            continue                        # too little evidence to be useful
+
+        run = run_core(program, max_cycles=10 * machine.retired + 300,
+                       data=image)
+        assert run.halted, f"RTL did not halt for program {programs}"
+        assert run.writes() == machine.trace, (
+            f"program {programs} (n={n}): " + _diff(run.writes(), machine.trace))
+        assert len(run.retires) == machine.retired, (
+            f"program {programs}: {len(run.retires)} retire pulses vs "
+            f"{machine.retired} executed instructions")
+
+        # Memory oracle: the epilogue's LD walk is the RTL's view of words 0..31.
+        readback = [value for _, pc, _, _, value in run.retires
+                    if pc == readback_pc]
+        assert len(readback) == READBACK_WORDS, len(readback)
+        assert readback == machine.mem[:READBACK_WORDS], (
+            f"program {programs}: " +
+            _first_mem_diff(readback, machine.mem[:READBACK_WORDS]))
+
+        programs += 1
+        total_writes += len(run.writes())
+        total_instr += machine.retired
+        total_loads += sum(1 for d in body if d.mem_read)
+        total_stores += sum(1 for d in body if d.mem_write)
+
+    assert programs >= 20, f"only {programs} random programs halted"
+    assert total_loads >= 40 and total_stores >= 25, (total_loads, total_stores)
+    assert total_writes >= 200, total_writes
+    print(f"fuzz ld/st: {programs} programs, {total_instr} instructions, "
+          f"{total_writes} compared writes, {total_loads} loads, "
+          f"{total_stores} stores, {programs * READBACK_WORDS} compared words")
 
 
 # --- measurement top --------------------------------------------------------

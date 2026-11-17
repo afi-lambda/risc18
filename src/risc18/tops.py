@@ -13,12 +13,13 @@ from .alu import ALU
 from .branch import BranchUnit
 from .core import Core
 from .decoder import PACK_WIDTH, Decoder, pack
+from .dmem import DEPTH as DMEM_DEPTH, DataMemory
 from .imem import DEPTH as IMEM_DEPTH, Fetch, InstrMemory
 from .pc import BranchTarget, PCUnit
 from .regfile import RegFile
 
-__all__ = ["AluTop", "BranchTargetTop", "BranchTop", "CoreTop", "DecoderTop",
-           "FetchTop", "InstrMemoryTop", "PcTop", "RegFileTop",
+__all__ = ["AluTop", "BranchTargetTop", "BranchTop", "CoreTop", "DataMemoryTop",
+           "DecoderTop", "FetchTop", "InstrMemoryTop", "PcTop", "RegFileTop",
            "CORE_TOP_PROGRAM"]
 
 
@@ -413,6 +414,65 @@ class InstrMemoryTop(Elaboratable):
             imem.i_en.eq(en_q),
         ]
         m.d.sync += self.o_data.eq(imem.o_data)
+
+        return m
+
+
+def _data_image(depth=DMEM_DEPTH):
+    """Deterministic non-zero data image for :class:`DataMemoryTop`.
+
+    Same construction as :func:`_program`: bit 17 is always set (no word is
+    zero, so yosys cannot fold the array away) and the low ten bits are a
+    bijection of the index (gcd(0x6B, 1024) == 1), so all 1024 words differ.
+    """
+    return [0x20000 | ((i * 0x6B) & 0x03FF) for i in range(depth)]
+
+
+class DataMemoryTop(Elaboratable):
+    """Registered-in / registered-out wrapper around :class:`DataMemory`.
+
+    Timing paths measured by nextpnr: ``i_addr``/``i_wdata``/``i_we`` -> ``*_q``
+    (port to register), then ``addr_q`` -> the DP16KD address input -> DOA ->
+    the ``o_rdata`` register, which is the interior register-to-register path
+    that carries fmax.  Three cycles of port-to-port latency (input register,
+    EBR access, output register).  The EBR is preloaded with
+    :func:`_data_image`'s deterministic 1024-word image so the milestone's
+    ``DP16KD >= 1`` requirement is meaningful.  Synthesis-only, like the other
+    unit tops: reset-less ``sync`` domain driven by ``self.clk``.
+    """
+
+    def __init__(self, init=None):
+        self.init = _data_image() if init is None else list(init)
+        self.clk = Signal()
+        self.i_addr = Signal(16)
+        self.i_wdata = Signal(isa.WIDTH)
+        self.i_we = Signal(1)
+        self.o_rdata = Signal(isa.WIDTH)
+        self.ports = [self.clk, self.i_addr, self.i_wdata, self.i_we,
+                      self.o_rdata]
+
+    def elaborate(self, platform):
+        m = Module()
+        cd = ClockDomain("sync", reset_less=True)
+        m.domains += cd
+        m.d.comb += cd.clk.eq(self.clk)
+        m.submodules.dmem = dmem = DataMemory(self.init)
+
+        addr_q = Signal(16)
+        wdata_q = Signal(isa.WIDTH)
+        we_q = Signal(1)
+
+        m.d.sync += [
+            addr_q.eq(self.i_addr),
+            wdata_q.eq(self.i_wdata),
+            we_q.eq(self.i_we),
+        ]
+        m.d.comb += [
+            dmem.i_addr.eq(addr_q),
+            dmem.i_wdata.eq(wdata_q),
+            dmem.i_we.eq(we_q),
+        ]
+        m.d.sync += self.o_rdata.eq(dmem.o_rdata)
 
         return m
 
