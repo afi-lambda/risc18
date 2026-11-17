@@ -151,3 +151,23 @@ in order of expected value: move the branch compare/resolve out of D (it is
 the largest single block on the path: 18-bit CCU2C chain -> redirect -> FD
 capture mux), register the operand-select inputs, or add the fifth stage the
 design brief suggests. Use 19.1-23.6 ns as the observed starting range.
+
+## M8 DSP multiplier
+
+* `MulTop` (combinational) is 0 LUT4, 54 FF, one MULT18X18D at 141.4 MHz;
+  `MulRegTop` (DSP output register, `REG_OUTPUT_CLK=CLK0`) is 0 LUT4, 54 FF, one
+  MULT18X18D at 185.01 MHz. Both are pure DSP: no LUT/carry multiplier exists in
+  either netlist, and `SIGNEDA/SIGNEDB=0` with `P[17:0]` used is correct because
+  the low 18 bits do not depend on the operand signedness.
+* A registered-DSP core variant (one bubble per MUL) was built and measured in a
+  scratch tree: golden-clean on 20 seeded M7 programs plus MUL edge cases, +1
+  cycle per MUL, and 48.46 / 47.57 MHz against the baseline's 44.86 / 46.08 —
+  overlapping, i.e. no gain. The decision is the combinational form, and no
+  multiply path appears in either core's nextpnr timing report: the DSP tops
+  have ~15 ns of margin at 45 MHz.
+* `CoreTop` at M8: 2325 LUT4, 584 FF, 2 DP16KD, 1 DSP, 44.86 MHz seed 1. The
+  +159 LUT4 against M7 is mapping sensitivity, not logic: the pre-M8 core and
+  the M8 core are cell-for-cell identical at `map_gates` (8 `$alu`, 76 `$eq`,
+  59 `$mux`, 6 `$pmux`, 39 `$sdff`, 1 `MULT18X18D`, 2 `DP16KD`), and the extra
+  module level changes ABC's result. M9 should re-check area after its
+  restructure rather than blame this delta on the multiplier.
