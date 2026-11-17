@@ -48,14 +48,26 @@ Caveats that apply to every unit milestone (M0–M4):
   17 is held high so no word is zero) and those 17 bits each drive a live DOA
   port; bit 17 folds to a constant that the in-range clear gates, so FF counts
   are still not reduced by constant folding.
-* M5 core: 1914 LUT4, 521 FF, 1 EBR, 1 DSP, 53.89 MHz at the 60 MHz constraint
-  (seed 7 gives 55.23). The critical path is the D stage: FD register ->
-  decoder -> operand mux -> branch compare -> target adder / PC mux -> PC
-  register, 3.7 ns logic and 14.9 ns routing. That is structural (a branch
-  resolves and redirects in one cycle), not placement noise, and closing it is
-  M9's job. Candidate fixes, in order of expected value: register the
-  branch target adder result and redirect from X (costs one extra branch
-  bubble), precompute `pc + 1 + imm` in F so D only selects, or add the fifth
-  pipeline stage the design brief suggests. CPI measured: 1.00 for a
-  dependency-free straight line, 1.74 for a counted loop, 1.83 for a distance-1
-  dependent chain (exactly one bubble per dependency), 1.00 at distance 2+.
+
+## M5 core (`CoreTop`) — not a unit top
+
+* 1914 LUT4, 521 FF, 1 DP16KD, 1 MULT18X18D, 53.89 MHz against the 60 MHz
+  constraint (seeds 2 and 7 give 55.71 and 55.23 MHz, so the miss is not seed
+  luck). The 16-word measurement image has instruction bit 3 constant, so
+  `fd_instr[3]`/`dx_imm[3]` fold: 521 = 523 - 2 and the figure is
+  program-dependent.
+* Critical path (structural, not placement noise): FD register -> decoder ->
+  operand mux -> branch compare -> target adder/PC mux -> redirect+squash select
+  -> FD capture mux -> FD register, 3.7 ns logic and 14.9 ns routing. A branch
+  resolves and redirects in one cycle, so closing it is M9's job. Candidate
+  fixes, best first: collapse `BranchTarget`'s two adders into one muxed-addend
+  adder (its 16-bit post-adder mux sits on this path); register the branch
+  target result and redirect from X (one extra branch bubble); precompute
+  `pc + 1 + imm` in F so D only selects; or add the fifth pipeline stage the
+  design brief suggests.
+* CPI: 1.00 for a dependency-free straight line, 1.74 for a counted loop, 1.83
+  for a distance-1 dependent chain (exactly one bubble per dependency), 1.00 at
+  distance 2 and beyond.
+* The core owns its `sync` domain, so this is the one top that is not
+  reset-less and not purely a measurement shell; FF counts include 57 shell FFs
+  (11%).

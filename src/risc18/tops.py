@@ -482,9 +482,10 @@ class CoreTop(Elaboratable):
 
     The core owns the reset-bearing ``sync`` domain it drives (``Core.cd``), so
     this top takes that domain's clock and reset signals as its own ``clk`` and
-    ``i_rst`` ports instead of declaring a second clock domain: there is
-    exactly one clock net and one reset net in the netlist, both declared, and
-    no generated ``clk$``/``rst$`` port.
+    ``i_rst`` ports instead of declaring a second clock domain: the netlist has
+    exactly one clock net and no generated ``clk$``/``rst$`` port.  Yosys
+    derives several reset aliases from ``i_rst`` (one of them don't-care-gated
+    on the X bubble), so "one reset net" would be an overstatement.
 
     The shell registers sit in a ``measure`` domain of their own, clocked and
     reset by those same two ports.  A separate domain object is required

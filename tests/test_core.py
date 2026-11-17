@@ -411,13 +411,20 @@ def test_mul_low_eighteen_bits():
         mul(5, 0, 4),
         addi(6, 0, 7),
         mul(7, 6, 6),
+        lui(8, 0x300),                 # r8 = 0x30000: bit 17 of the result
+        addi(9, 0, 2),
+        mul(10, 8, 9),                 # 0x30000 * 2 = 0x20000
+        mul(11, 2, 9),                 # 0x3FFFF * 2 = 0x3FFFE
         halt(),
     ]
     machine, run = assert_lockstep(program)
-    assert run.writes()[2][2] == (0x3FF00 * 0x3FFFF) & isa.MASK
-    assert run.writes()[3][2] == (0x3FFFF * 0x3FFFF) & isa.MASK
-    assert run.writes()[4][2] == 0
-    assert run.writes()[6][2] == 49
+    w = {rd: value for _, rd, value in run.writes()}
+    assert w[3] == (0x3FF00 * 0x3FFFF) & isa.MASK
+    assert w[4] == (0x3FFFF * 0x3FFFF) & isa.MASK
+    assert w[5] == 0
+    assert w[7] == 49
+    assert w[10] == 0x20000 and w[10] >> 17 == 1
+    assert w[11] == 0x3FFFE and w[11] >> 17 == 1
 
 
 def test_r0_writes_are_discarded_and_r0_reads_zero():
@@ -502,6 +509,52 @@ def test_reset_clears_pipeline_so_first_write_is_instruction_zero():
 
 # --- M5 scope: no data memory ----------------------------------------------
 
+def test_mid_run_reset_restarts_the_program_cleanly():
+    """A reset pulse mid-program replays the run from PC 0 with no stale state."""
+    program = [addi(1, 0, 3), addi(2, 1, 4), addi(3, 2, 5), halt()]
+    core = Core(program)
+    runs = []
+    sim = Simulator(core)
+    sim.add_clock(CLK_PERIOD, domain="sync")
+
+    async def one_run(ctx, prime_cycles, reset_cycles):
+        ctx.set(core.i_rst, 1)
+        for _ in range(2):
+            await ctx.tick()
+        ctx.set(core.i_rst, 0)
+        for _ in range(prime_cycles):
+            await ctx.tick()
+        ctx.set(core.i_rst, 1)
+        for _ in range(reset_cycles):
+            await ctx.tick()
+            assert ctx.get(core.o_retire) == 0
+        ctx.set(core.i_rst, 0)
+        rows = []
+        for _ in range(60):
+            await ctx.tick()
+            await ctx.delay(SETTLE)
+            if ctx.get(core.o_retire):
+                rows.append((ctx.get(core.o_retire_pc),
+                             ctx.get(core.o_retire_we),
+                             ctx.get(core.o_retire_rd),
+                             ctx.get(core.o_retire_value)))
+            if ctx.get(core.o_halt):
+                break
+        return rows
+
+    async def tb(ctx):
+        runs.append(await one_run(ctx, 1, 1))
+        runs.append(await one_run(ctx, 3, 2))
+
+    sim.add_testbench(tb)
+    sim.run()
+
+    want = [(0, 1, 1, 3), (1, 1, 2, 7), (2, 1, 3, 12), (3, 0, 0, None)]
+    got = [(pc, we, rd, (v if we else None)) for pc, we, rd, v in runs[0]]
+    assert got == want, got
+    assert runs[1] == runs[0], runs[1]
+
+
 def test_ld_st_are_no_ops_in_m5():
     """M5 has no data memory: LD/ST retire but write nothing and touch nothing.
 
@@ -565,7 +618,6 @@ def test_straight_line_retires_without_gratuitous_stalls():
     assert len(program) == 20
     machine, run = assert_lockstep(program)
     assert len(run.retires) == machine.retired == 20
-    assert run.cycles <= 26, f"{run.cycles} cycles for a dependency-free run"
     assert run.cycles == 20, f"{run.cycles} cycles: a stall slipped in"
 
 
@@ -579,7 +631,6 @@ def test_dependent_chain_stalls_at_most_once_per_dependency():
     dependencies = len(chain) - 1
     assert len(run.retires) == machine.retired == 12
     # 12 instructions + one bubble per dependency (11 writes, 10 dependencies).
-    assert run.cycles <= len(program) + dependencies
     assert run.cycles == len(program) + dependencies, run.cycles
 
 
@@ -659,6 +710,8 @@ def test_seeded_random_programs_lockstep_with_golden():
         machine = Machine(program).run(4000)
         if not machine.halted:
             continue                        # data-dependent loop: draw again
+        if machine.retired < 15 or len(machine.trace) < 5:
+            continue                        # too little evidence to be useful
 
         run = run_core(program, max_cycles=10 * machine.retired + 100)
         assert run.halted, f"RTL did not halt for program {programs}"

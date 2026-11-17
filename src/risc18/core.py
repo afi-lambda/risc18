@@ -40,7 +40,8 @@ so an LD writes no register and an ST writes nothing; both retire (so retire
 counts still match the golden model's *instruction* count for such programs)
 and neither can hang the pipeline.  M6 replaces this with the data EBR and the
 load-use interlock.  MUL is a single-cycle combinational 18x18 multiply masked
-to 18 bits; DSP inference is M8's concern.
+to 18 bits; it already maps to one MULT18X18D, so M8 owns operand edge cases
+and result handling rather than cell inference.
 
 Reset: the core owns the ``sync`` domain it drives (``i_rst`` is wired to that
 domain's ``rst``), so every unit elaborated underneath -- ``PCUnit``,

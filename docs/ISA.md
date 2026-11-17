@@ -189,11 +189,15 @@ Core(program=[...])   # words loaded into instruction memory
   o_retire_rd:      Signal(4)
   o_retire_value:   Signal(18)
   o_halt:           Signal(1)    # sticky, set when HALT retires
+  cd:               ClockDomain("sync")   # owned by Core
 ```
 
-`o_retire` pulses once per instruction, in program order; the `o_retire_we=1`
-rows are exactly the architectural write trace that `golden.Machine.trace`
-records. `o_halt` asserts when the HALT instruction retires; fetching is already
+`Core` owns the `sync` domain it resets (`cd`), so an enclosing top must drive
+`cd.clk`/`cd.rst` and may not declare a second `sync` domain of its own.
+
+`o_retire` pulses once per instruction, in program order. The `o_retire_we=1`
+rows match `golden.Machine.trace` for every program without LD; in M5 an LD
+retires with `we=0` and writes nothing (M6 restores the write). `o_halt` asserts when the HALT instruction retires; fetching is already
 frozen at that point and the PC holds its post-HALT value.
 
 Pipeline (M5+): F (PC register, instruction EBR, FD register), D (decode,
