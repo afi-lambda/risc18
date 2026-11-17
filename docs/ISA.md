@@ -150,6 +150,17 @@ class DataMemory(Elaboratable):
     i_addr: Signal(16); i_wdata: Signal(18)
     i_we: Signal(1)
     o_rdata: Signal(18)           # synchronous read, 1-cycle latency
+
+class BranchTarget(Elaboratable):
+    i_pc: Signal(16); i_imm: Signal(18); i_rs1: Signal(18)
+    i_jump_reg: Signal(1); o_target: Signal(16)
+    # jump_reg=0: (pc + 1 + signed(imm)) & 0xFFFF  (branch, JAL)
+    # jump_reg=1: (rs1 + signed(imm)) & 0xFFFF    (JALR, no +1)
+
+class PCUnit(Elaboratable):
+    i_redirect: Signal(1); i_target: Signal(16); i_hold: Signal(1)
+    o_pc: Signal(16)
+    # redirect > hold > increment; wraps at 2^16; sync reset clears to 0
 ```
 
 ## 6. Core (M5 onward)
