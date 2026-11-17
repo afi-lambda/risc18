@@ -67,6 +67,13 @@ def _assert_isa_match(words, chunks=8):
                      + "\n".join(bad[:chunks]))
 
 
+def _packed(decoded):
+    value = 0
+    for name, offset, width in PACK_LAYOUT:
+        value |= (getattr(decoded, name) & ((1 << width) - 1)) << offset
+    return value
+
+
 # --- literal table (independent of isa.decode) ------------------------------
 
 # Hand-decoded from docs/ISA.md: (op, rd, rs1, rs2, imm, alu_op, alu_src_imm,
@@ -295,4 +302,31 @@ def test_decoder_top_has_single_clock_and_no_generated_reset():
     assert "clk$" not in header            # no auto-generated second clock
     assert "rst" not in v                  # reset-less sync domain
     assert v.count("posedge clk") == 2     # instr_q and o_pack registers
+
+
+def test_decoder_top_registers_input_and_pack_in_sim():
+    """Drive the top-level clock manually; the domain is comb-driven."""
+    top = DecoderTop()
+    words = [isa.i_type(isa.OP_ADDI, 1, 2, -1),
+             isa.r_type(isa.OP_ALU, isa.ALU_SUB, 4, 5, 6),
+             isa.b_type(isa.OP_BLT, 3, 4, -7),
+             isa.j_type(isa.OP_LUI, 9, 0x155),
+             isa.i_type(isa.OP_SYSTEM, 0, 0, isa.SYS_HALT)]
+    sim = Simulator(top)
+    seen = []
+
+    async def tb(ctx):
+        for word in words:
+            ctx.set(top.i_instr, word)
+            for _ in range(2):                     # input reg, then pack reg
+                ctx.set(top.clk, 1)
+                await ctx.delay(1e-6)
+                ctx.set(top.clk, 0)
+                await ctx.delay(1e-6)
+            seen.append(ctx.get(top.o_pack))
+
+    sim.add_testbench(tb)
+    sim.run()
+    assert seen == [_packed(isa.decode(w)) for w in words]
+
 

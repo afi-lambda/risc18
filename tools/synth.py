@@ -65,6 +65,22 @@ def parse_util(text: str):
     return util
 
 
+def _norm_clock(name: str) -> str:
+    """Normalise a nextpnr clock name so pre/post-global-promotion reports match.
+
+    nextpnr may report the placement estimate as ``clk`` and the routed result
+    as ``$glbnet$clk$TRELLIS_IO_IN``; both are the same clock.
+    """
+    name = name.lstrip("\\")
+    for prefix in ("$glbnet$",):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+    for suffix in ("$TRELLIS_IO_IN",):
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
+    return name
+
+
 def parse_fmax(text: str):
     """Return one entry per clock, keeping the last (post-route) report.
 
@@ -76,11 +92,12 @@ def parse_fmax(text: str):
     for name, mhz, verdict, target in re.findall(
             r"Max frequency for clock '([^']+)': ([\d.]+) MHz \((\w+) at ([\d.]+) MHz\)",
             text):
-        if name not in found:
-            order.append(name)
-        found[name] = {"clock": name, "fmax_mhz": float(mhz),
-                       "constraint_mhz": float(target), "met": verdict == "PASS"}
-    return [found[name] for name in order]
+        key = _norm_clock(name)
+        if key not in found:
+            order.append(key)
+        found[key] = {"clock": name, "fmax_mhz": float(mhz),
+                      "constraint_mhz": float(target), "met": verdict == "PASS"}
+    return [found[key] for key in order]
 
 
 def parse_critical(text: str):
