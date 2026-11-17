@@ -29,7 +29,8 @@ def _program(depth=IMEM_DEPTH):
     are a bijection of the index (gcd(0x2D, 1024) == 1), so every address holds
     a different value.
     """
-    return [0x20000 | ((i * 0x2D) & 0x03FF) | ((i & 0x3F) << 12)
+    return [0x20000 | ((i * 0x2D) & 0x03FF) | ((i & 0x3) << 10)
+            | ((i & 0x3F) << 12)
             for i in range(depth)]
 
 
@@ -343,11 +344,11 @@ class InstrMemoryTop(Elaboratable):
     """Registered-in / registered-out wrapper around :class:`InstrMemory`.
 
     Timing path measured by nextpnr: ``i_addr``/``i_en`` -> ``*_q`` (port to
-    register), then ``addr_q`` -> the DP16KD address input -> the EBR output
-    register (its clock enable is ``en_q``) -> the ``o_data`` register, which
-    is the interior register-to-register path that carries fmax.  Three cycles
-    of port-to-port latency (input register, EBR output register, output
-    register).  The EBR is preloaded with
+    register), then ``addr_q`` -> the DP16KD address input -> DOA (the EBR's
+    clock-enabled read path, ``CEA = en_q``, ``REGMODE_A="NOREG"``) -> the
+    ``o_data`` register, which is the interior register-to-register path that
+    carries fmax.  Three cycles of port-to-port latency (input register, EBR
+    access, output register).  The EBR is preloaded with
     :func:`_program`'s deterministic 1024-word image so the milestone's
     ``DP16KD >= 1`` requirement is meaningful.  Synthesis-only, like the other
     unit tops: reset-less ``sync`` domain driven by ``self.clk``.
@@ -392,12 +393,11 @@ class FetchTop(Elaboratable):
     * ``i_redirect``/``i_target``/``i_hold`` -> ``*_q`` (port to register);
     * ``*_q`` -> PC priority mux / incrementer -> the PC register (interior
       register-to-register, the path that usually carries fmax);
-    * PC register -> DP16KD address -> EBR output register -> ``o_instr``
-      register, and PC register -> ``instr_pc`` register -> ``o_instr_pc``
-      register.
+    * PC register -> DP16KD address/CE -> DOA -> ``o_instr`` register, and PC
+      register -> ``instr_pc`` register -> ``o_instr_pc`` register.
 
     Four cycles of port-to-port latency (input register, PC register, EBR
-    output register, output register).  Preloaded with :func:`_program`'s
+    access, output register).  Preloaded with :func:`_program`'s
     image like :class:`InstrMemoryTop`.  Synthesis-only: reset-less ``sync``
     domain driven by ``self.clk``, so the netlist has exactly one clock port
     and no generated reset port.

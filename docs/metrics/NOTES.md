@@ -37,8 +37,12 @@ Caveats that apply to every unit milestone (M0–M4):
   LUT: it becomes a native FF clock enable. BranchTarget builds two adders
   although only 16 result bits are used; collapsing to one adder with a muxed
   addend is an M5 option.
-* M4 instruction memory / fetch: InstrMemoryTop is 5 LUT4 + 34 FF with one
-  DP16KD (the unit is the EBR plus a 1-LUT out-of-range mux and a registered
-  flag); FetchTop is 37 LUT4 + 99 FF, one DP16KD. The measured 145–150 MHz is
-  limited by the EBR clock-to-output path (5.6 ns logic in the report), not by
-  control logic; that is the F-stage floor the pipeline inherits.
+* M4 instruction memory / fetch: InstrMemoryTop is 5 LUT4 + 36 FF with one
+  DP16KD; FetchTop is 37 LUT4 + 101 FF, one DP16KD. The unit's 5 LUT4 are a
+  ~4-LUT4 in-range compare (LUT4 + PFUMX + L6MUX21) plus a 1-LUT4 clear that
+  forces the output register to 0 through its LSR pin. nextpnr maps the read
+  port to DP16KD with `REGMODE_A="NOREG"` and `CEA = en`, i.e. `en` freezes the
+  EBR address register, not a fabric output register. The 5.6 ns critical path
+  is EBR array access to DOA plus the destination setup — that is the F-stage
+  floor the pipeline inherits. The measurement image varies all 18 bits, so FF
+  counts are not reduced by constant folding.

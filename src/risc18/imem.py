@@ -10,8 +10,9 @@ one DP16KD:
 * address ``i_addr`` and enable ``i_en`` are sampled on the clock edge; the
   word at that address appears on ``o_data`` *after* the edge (one cycle of
   latency, no transparency);
-* ``i_en`` low freezes the EBR output register (the primitive's own CE), so
-  ``o_data`` holds its previous value;
+* ``i_en`` low freezes the EBR's clock-enabled read path (its address register
+  clock enable, ``CEA``; yosys reports ``REGMODE_A="NOREG"``), so ``o_data``
+  holds its previous value;
 * word addresses ``>= 1024`` are outside the memory and read as 0.  The EBR
   address is truncated to ten bits, so an out-of-range read aliases onto a real
   word; a registered in-range flag muxes the output back to 0 in step with the
@@ -29,18 +30,25 @@ Latency accounting (the numbers the tests pin down), counting clock edges from
 the edge that makes a PC value current:
 
 * edge 1 loads the PC (reset, or a redirect's target, or ``pc + 1``);
-* edge 2 loads the instruction for it into the EBR output register.
+* edge 2 makes the word for that PC available on the EBR read path.
 
-So an instruction appears two edges after the PC value is established, and the
-instruction for a redirect takes exactly that long too: the redirect is
-asserted during the cycle it is decoded, the target PC is current after the
-next edge, its instruction after the edge following that.
+So an instruction appears one edge after its PC becomes the fetch address, i.e.
+two edges counting the edge that loaded the PC.  The instruction for a redirect
+takes exactly that long too: the redirect is asserted during the cycle it is
+decoded, the target PC is current after the next edge, its instruction one edge
+after that.
 
 ``i_hold`` freezes both the PC and the EBR output register (``i_en = ~i_hold``)
 and, with it, ``o_instr_pc``, so a stalled fetch repeats the same tagged
 instruction.  ``i_redirect`` takes priority over ``i_hold`` inside
 :class:`PCUnit`; a redirect asserted while held moves the PC but keeps the
 current ``o_instr``/``o_instr_pc`` until the hold is released.
+
+Reset: the first cycle after the reset edge presents ``o_instr_pc = 0`` with
+``o_instr = 0`` (the in-range flag is cleared, so the read path is masked) —
+this is not word 0.  The real instruction for PC 0 appears one edge later, so
+the M5 core must keep its first fetch slot empty for one cycle after reset and
+must not treat the pair as a valid instruction before then.
 """
 
 import warnings
@@ -91,8 +99,9 @@ class InstrMemory(Elaboratable):
             mem = Memory(width=isa.WIDTH, depth=DEPTH, init=_words(self.init))
         m.submodules.mem = mem
         # Synchronous (non-transparent) read port: the address and enable are
-        # sampled on the edge and data appears after it.  Yosys folds this into
-        # the DP16KD output register, with `en` as its clock enable.
+        # sampled on the edge and data appears after it.  Yosys maps this onto
+        # one DP16KD with REGMODE_A="NOREG": `en` drives the EBR's address
+        # register clock enable (CEA), which is what freezes DOA while low.
         rp = mem.read_port(domain="sync")
         m.d.comb += [
             rp.addr.eq(self.i_addr[:ADDR_BITS]),
@@ -137,7 +146,7 @@ class Fetch(Elaboratable):
             pc.i_hold.eq(self.i_hold),
         ]
         # The EBR fetches the PC that is current this cycle, and is disabled
-        # while the fetch is held so its output register freezes.
+        # while the fetch is held so the EBR read path holds its data.
         m.d.comb += [
             imem.i_addr.eq(pc.o_pc),
             imem.i_en.eq(~self.i_hold),

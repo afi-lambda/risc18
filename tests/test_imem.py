@@ -395,7 +395,7 @@ def test_first_instruction_two_cycles_after_reset():
 
     _run(h, tb)
     assert seen[0][0] == 0 and seen[0][1] == 0, seen[0]
-    assert seen[0][2] != ROM[0], hex(seen[0][2])   # nothing fetched yet
+    assert seen[0][2] == 0, hex(seen[0][2])       # masked, not word 0
     assert seen[1] == (1, 0, ROM[0]), [hex(v) for v in seen[1]]
     assert seen[2] == (2, 1, ROM[1]), [hex(v) for v in seen[2]]
 
@@ -530,7 +530,7 @@ def test_random_script_against_python_model():
     model_instr = 0
     for _ in range(n_steps):
         redirect = 1 if rng.random() < 0.25 else 0
-        hold = 0 if redirect else (1 if rng.random() < 0.30 else 0)
+        hold = 1 if rng.random() < 0.30 else 0
         target = rng.randrange(1 << PC_WIDTH)
         if rng.random() < 0.15:
             target = rng.choice([0, DEPTH - 1, DEPTH, DEPTH + 3, 0xFFFF,
@@ -545,6 +545,7 @@ def test_random_script_against_python_model():
     assert sum(1 for s in script if s[0]) >= 40                 # redirects
     assert sum(1 for s in script if s[2]) >= 30                 # holds
     assert sum(1 for s in script if not s[0] and not s[2]) >= 120
+    assert sum(1 for s in script if s[0] and s[2]) >= 15        # redirect+hold
     assert sum(1 for s in script if s[3] >= DEPTH) >= 40        # out-of-range
 
     h = FetchHarness(rom)
