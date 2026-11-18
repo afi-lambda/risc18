@@ -23,8 +23,10 @@ available there since M10) and consumes the data in D.  Two consequences:
 * the array cannot be cleared by the synchronous reset.  ``DPR16X4`` has no
   reset and the RAM contents come from the bitstream's initialisation, so a
   mid-run reset leaves the registers as they were.  ``clear=True`` adds a
-  16-cycle zeroing sequence on the write port for designs that need the frozen
-  contract; it requires the reset to be held for 16 cycles.
+  16-cycle zeroing walk of the write port that runs *after* the reset is
+  released (one cycle of reset is enough; the registers read zero from the
+  16th cycle after deassertion).  While the walk runs the write port belongs to
+  it, so a software write issued in that window is dropped.
 
 Interface
 ---------
@@ -63,13 +65,6 @@ class RegFileRam(Elaboratable):
         wp = mem.write_port()
         rp1 = mem.read_port()
         rp2 = mem.read_port()
-
-        # The address is registered alongside the data so r0 can be forced to
-        # zero on the *output* side, where it costs one 18-bit mux instead of a
-        # 16-way decode in front of the RAM.
-        rs1_q = Signal(4)
-        rs2_q = Signal(4)
-        m.d.sync += [rs1_q.eq(self.i_rs1), rs2_q.eq(self.i_rs2)]
 
         m.d.comb += [
             rp1.addr.eq(self.i_rs1),

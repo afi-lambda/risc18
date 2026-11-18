@@ -1,4 +1,4 @@
-# m11_core_ram (seed 1, --ram-rf)
+# m11_core_ram
 
 top: `risc18.tops:CoreTop`  
 device: `LFE5U-25F-6CABGA256`  

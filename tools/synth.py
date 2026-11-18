@@ -37,7 +37,11 @@ def load_top(spec: str, **top_kwargs):
     if not attr:
         raise SystemExit(f"--top must be module:attr, got {spec!r}")
     mod = importlib.import_module(mod_name)
-    top = getattr(mod, attr)(**top_kwargs)
+    cls = getattr(mod, attr)
+    try:
+        top = cls(**top_kwargs)
+    except TypeError as exc:
+        raise SystemExit(f"{spec} does not accept {sorted(top_kwargs)}: {exc}")
     ports = getattr(top, "ports", None)
     if ports is None:
         raise SystemExit(f"{spec} has no .ports attribute")

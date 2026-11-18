@@ -300,10 +300,12 @@ the one the device offers.
 Reproduce (seed 1; the sweep is the same command with `--seed 2|3|7`):
 
 ```
-.venv/bin/python tools/synth.py --top risc18.tops:CoreTop --name m11c_ram_s1 \
+.venv/bin/python tools/synth.py --top risc18.tops:CoreTop --name m11_core_ram \
     --freq 60 --seed 1 --ram-rf
-.venv/bin/python tools/synth.py --top risc18.tops:FullTop --name m11f_ram_s1 \
+.venv/bin/python tools/synth.py --top risc18.tops:FullTop --name m11_full_ram \
     --freq 25 --seed 1 --ram-rf
+.venv/bin/python tools/synth.py --top risc18.tops:CoreTop --name m11_core_flop \
+    --freq 60 --seed 1
 ```
 
 | build (CoreTop, 60 MHz) | LUT4 | FF | DPR16X4 | fmax seeds 1/2/3/7 | mean | worst |
@@ -315,10 +317,14 @@ Reproduce (seed 1; the sweep is the same command with `--seed 2|3|7`):
 RAM file: 1272 LUT4 / 437 FF / **67.59 MHz** (flop file: 1620 / 670 / 73.45) -- so
 the chip-level top loses 5.9 MHz even though the core top is roughly neutral.
 
-Removing the two output-side `r0` masks was worth -190 LUT4 and +7.6 MHz on its
-own (1373 / 415 / 65.87-73.42 before): `r0` cannot be written (the write enable
-discards `i_rd == 0`) and the array initialises to zero, so the masks were
-duplicate logic that also pushed the RAM output through an extra mux.
+Two output-side `r0` masks were removed: `r0` cannot be written (the write enable
+discards `i_rd == 0`) and the array initialises to zero, so they were duplicate
+logic that also pushed the RAM output through an extra mux.  Single-variable
+build at seed 1 (masks restored verbatim): 1369 LUT4 / 415 FF / 71.62 MHz vs
+1183 / 407 / 73.48 without them, i.e. -186 LUT4, -8 FF and +1.9 MHz from the
+masks alone; the remaining seed-1 difference against the pre-review tree
+(1373 / 415 / 65.87) is placement, not logic -- which is exactly why every table
+here quotes a four-seed sweep.
 
 **Critical path.** The claim to make precisely: the flop file's *read-mux and
 write-through* path is gone, and on the RAM builds the worst path is now
@@ -337,15 +343,19 @@ with the flop file's mux tree in front of it, that hop was hidden.
    issues the read in F and consumes it in D; while D is stalled the address is
    switched to D's own operands, otherwise the stall-release edge would capture
    the operands of the instruction still in F (this was a real bug, caught by
-   `test_memory_accumulation_loop_matches_golden` and the seeded chain test).
+   `test_accumulation_loop_with_loads_and_stores_matches_golden`,
+   `test_load_use_stall_reads_the_right_operand_after_the_bubble` and
+   `test_seeded_random_programs_lockstep_with_golden` in `tests/test_ramrf.py`).
 2. There is no same-cycle write-through, so the operand select carries explicit
    W (`w_hit`, a producer three instructions ahead) and W-1 (`wq_hit`, four
    ahead) bypasses.  Both are load-bearing: zeroing either turns a test red.
 3. The array cannot be cleared by the synchronous reset: `DPR16X4` has no reset
    and the contents come from the bitstream initialisation, so a mid-run reset
    leaves the registers as they were.  `RegFileRam(clear=True)` adds a 16-cycle
-   zeroing sequence on the write port (single-driver, tested); it needs the reset
-   held for 16 cycles.
+   zeroing walk of the write port (single-driver, tested).  The walk runs *after*
+   deassertion, so one cycle of reset suffices and the registers read zero from
+   the 16th cycle after it; while it runs, the write port belongs to the walk and
+   a software write in that window is dropped.
 
 The flop file stays the default (fmax first, and it keeps the frozen reset
 guarantee). `docs/metrics/m11_core_ram.md`, `m11_full_ram.md` and
