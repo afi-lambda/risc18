@@ -39,8 +39,11 @@ tools/asm.py            two-pass assembler for test programs
 tools/synth.py          Amaranth -> Verilog -> yosys -> nextpnr -> metrics
 docs/ISA.md             normative ISA and interface contract
 docs/MILESTONES.md      milestone scopes and gates
-sw/                     assembly test programs
+docs/RESULTS.md         M9 timing/resource report (measured)
+docs/HANDOFF.md         state of the design, gates and next steps
 tests/                  pytest suites (Amaranth simulation + golden lockstep)
+docs/metrics/           committed synth metric summaries (post-route)
+design.txt              original design brief
 ```
 
 ## Status
@@ -57,4 +60,4 @@ tests/                  pytest suites (Amaranth simulation + golden lockstep)
 | M6 data EBR and LD/ST | done |
 | M7 forwarding and hazards | done |
 | M8 DSP multiplier | done |
-| M9 timing closure | M9a in review (#10); M9b (PLL full top, docs/RESULTS.md) in review (#11) |
+| M9 timing closure | done (CoreTop 65.8-73.9 MHz, FullTop with PLL 64.2-74.5 MHz; docs/RESULTS.md) |

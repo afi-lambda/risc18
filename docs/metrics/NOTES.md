@@ -181,8 +181,9 @@ Two structural steps were needed; the first alone was not enough.
   revisit if a later design cares more about branch-heavy code than fmax.
 * Residual risk: the tightest seed is 1 at 65.82 MHz, i.e. 5.8 MHz of margin
   (1.47 ns of a 16.67 ns budget, 8.8%), and the spread across seeds is 8.1 MHz.
-  `docs/metrics/m9_core.md` records the seed-1 run (the tool writes `--seed` into
-  the JSON only); the four-seed sweep above is the headline number.
+  `docs/metrics/m9_core.md` records the seed-1 run (the tool passes `--seed` to
+  nextpnr but records it in neither the JSON nor the markdown); the four-seed
+  sweep above is the headline number.
   Every seed's limiter is the D -> X operand-register load through the
   forward/hazard select (`dx_b` on seeds 1/2/3, `dx_a` on seed 7).
   Levers, in order: a dedicated distance-1 bypass out of `x_value` (a plain D1/D2
