@@ -217,3 +217,72 @@ The four-seed sweep is the same command with `--seed 2|3|7` and a seed-suffixed
 `--name`. Committed reports: `docs/metrics/m11_core_flop.md`,
 `m11_core_ram.md`, `m11_full_ram.md`; the segment-level numbers above come from
 the `Critical path report` blocks in the matching `build/synth/*/pnr_seed1.log`.
+
+## 6. Cost breakdown: which cones spend LUT4, which spend delay
+
+Two facts first, because they bound everything else. Cell-type counts come
+straight out of the mapped netlist (`build/synth/<build>/top.json`):
+
+| build | LUT4 cells | CCU2C | PFUMX | L6MUX21 | FF | DSP | DPR16X4 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| flop register file | 1514 | 63 | 347 | 129 | 640 | 1 | 0 |
+| RAM register file | 997 | 63 | 235 | 70 | 407 | 1 | 10 |
+
+A CCU2C occupies two LUT4 sites, so the flop build's 1640 sites are exactly
+1514 + 2 x 63; PFUMX and L6MUX21 pack into LUT4 sites rather than adding to
+them, but they are the mux trees and they are where the delay lives.
+
+Per-cone attribution is **not** additive. ABC remaps globally, so a small edit
+can remove logic and make area go up. The numbers below are single-variant
+builds (`tools/ablations.sh`, CoreTop, seed 1, synthesis only, functionally
+wrong on purpose) and are read as "the shape of this cone's cost", with the two
+structural moves -- the register-file read muxes and the forwarding network --
+being the only ones large enough to trust as arithmetic.
+
+| variant | flop LUT4 | delta | flop fmax | RAM LUT4 | delta | RAM fmax |
+|---|---:|---:|---:|---:|---:|---:|
+| control | 1640 | -- | 71.03 | 1183 | -- | 73.48 |
+| forwarding network removed | 1447 | -193 | 69.57 | 1001 | -182 | 72.07 |
+| branch compare tied off | 1521 | -119 | 77.82 | 1084 | -99 | 72.12 |
+| branch target adder removed | 1567 | -73 | 77.35 | 1218 | +35 | 67.94 |
+| multiply forced to constant | 1738 | +98 | 79.63 | 1295 | +112 | 66.76 |
+| register-file read muxes (`--ram-rf`) | 1183 | -457 | 73.48 | -- | -- | -- |
+
+How to read the two odd rows:
+
+* **multiply** is not an area cost, it is a remap. Deleting the DSP frees
+  3.9 ns of the critical loop, so ABC re-maps the whole `x_value` cone for speed
+  and area goes *up* while fmax gains 8.6 MHz (flop build). In the RAM build the
+  same deletion *loses* 6.7 MHz: once the read muxes are gone the select tree,
+  not the multiply, is what the loop is made of, and taking the DSP out only
+  makes that tree bigger.
+* **branch target adder** saves 73 LUT4 and 18 FF with flops (the adder goes and
+  `ct_target` collapses into `dx_pc`) but the RAM build measures *+35* LUT4 --
+  pure remap noise, which is exactly the reason not to quote single-variant
+  deltas as budgets.
+
+Delay, from the nextpnr critical-path segments:
+
+| | flop build | RAM build |
+|---|---|---|
+| worst path | 14.1 ns (5.8 logic + 8.3 routing), 71.03 MHz | 13.6 ns (6.8 logic + 6.8 routing), 73.48 MHz |
+| chain | `dx_a` FF 0.5 -> MULT18X18D 3.9 -> `o_target` CCU2C 1.9 -> `x_value` select tree, 4 L6MUX21/PFUMX levels, 2.0 -> `d_rs1` bypass 1.2 -> `dx_a` of the next instruction | imem EBR DOA clock-to-out 5.6 -> decode cone, 2 LUT levels, 2.0 -> regfile read address + stall mux 2.0 -> DPR16X4 addr-to-out 1.9 -> read-data FF |
+| what it means | one 18-bit loop: multiply -> target -> result select -> forward -> operand register | fetch-side chain, no arithmetic in it |
+| routing share | 59 % | 50 % |
+| second-worst path | 8.3 ns, `i_rst` to FF reset pins | 7.3 ns, same |
+
+The second-worst path in both builds is reset distribution, not datapath: it is
+the first thing you meet above roughly 90 MHz, and it is a fanout problem rather
+than a logic one. FullTop (PLL + boot sequencer) measures 73.45 MHz flop /
+67.59 MHz RAM at seed 1, i.e. on the whole chip the fetch-side chain of the RAM
+build is exposed an extra 6 MHz worse than the core top suggests.
+
+Reproduce:
+
+```
+tools/ablations.sh                 # flop table
+tools/ablations.sh --ram           # RAM table
+```
+
+Each run builds into `build/ablations/<variant>` from a scratch copy of the tree;
+nothing in the tracked tree is modified and no test runs against the variants.
