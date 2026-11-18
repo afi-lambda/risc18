@@ -17,11 +17,13 @@ from .dmem import DEPTH as DMEM_DEPTH, DataMemory
 from .imem import DEPTH as IMEM_DEPTH, Fetch, InstrMemory
 from .mul import Multiplier
 from .pc import BranchTarget, PCUnit
+from .pll import Pll
 from .regfile import RegFile
 
-__all__ = ["AluTop", "BranchTargetTop", "BranchTop", "CoreTop", "DataMemoryTop",
-           "DecoderTop", "FetchTop", "InstrMemoryTop", "MulRegTop", "MulTop",
-           "PcTop", "RegFileTop", "CORE_TOP_PROGRAM"]
+__all__ = ["AluTop", "BootReset", "BranchTargetTop", "BranchTop", "CoreTop",
+           "DataMemoryTop", "DecoderTop", "FetchTop", "FullTop",
+           "InstrMemoryTop", "MulRegTop", "MulTop", "PcTop", "RegFileTop",
+           "CORE_TOP_PROGRAM"]
 
 
 def _b(op, rs2, rs1, imm6):
@@ -701,6 +703,208 @@ class CoreTop(Elaboratable):
             self.o_retire_rd.eq(self.core.o_retire_rd),
             self.o_retire_value.eq(self.core.o_retire_value),
             self.o_halt.eq(self.core.o_halt),
+        ]
+
+        return m
+
+
+#: Boot clocks ``FullTop`` keeps the core in reset after ``LOCK`` rises, and
+#: after every watchdog expiry.  Eight 60 MHz clocks (133 ns) is far more than
+#: the core needs to leave its reset state, and it costs four FFs.
+BOOT_HOLD = 8
+
+#: Watchdog width: ``2**26`` core clocks is 1.12 s at 60 MHz -- long enough for
+#: any measurement program (``CORE_TOP_PROGRAM`` halts after ~26 cycles) and
+#: short enough that a hung core visibly restarts instead of freezing the board.
+WDOG_BITS = 26
+
+
+class BootReset(Elaboratable):
+    """Reset sequencer and watchdog for the PLL-clocked core (M9b).
+
+    Plain RTL in its own reset-less ``boot`` domain (clocked by the top from
+    the PLL output), so it is simulatable even though the PLL it watches is
+    not.  Three behaviours, in priority order:
+
+    1. ``~i_locked`` -- ``o_rst`` is held high and the watchdog is cleared, so
+       the core never sees a clock that is still slewing/undivided;
+    2. ``i_locked`` and the hold counter is still running -- ``o_rst`` stays
+       high for :data:`BOOT_HOLD` clocks after ``LOCK`` rises, which is the
+       "release only when locked" part: lock can precede a stable output by a
+       few cycles, and the core must start from a known reset state;
+    3. released -- while ``i_halt`` is low the watchdog counts; on expiry it
+       reloads the hold counter and clears itself, i.e. it re-resets the core
+       and the program runs again.  ``i_halt`` high (the program finished)
+       clears the watchdog, so a completed measurement is never restarted.
+
+    ``o_rst`` is combinational (``~released``) so the reset is asserted in the
+    same cycle the decision is taken, and it is a synchronous reset at the core
+    -- one cycle is enough, the hold window is only for settling.
+
+    Everything the sequencer stores powers up at 0 (Trellis FFs, no ``init``
+    value and no ``zinit`` in this flow -- ``synth_ecp5`` is run without
+    ``-dff``, so a ``Signal(init=...)`` on a flip-flop would *not* reach the
+    bitstream).  The state is therefore inverted on purpose: ``released`` is the
+    register, not ``hold``, so ``o_rst`` is already high in the power-up cycle,
+    before this domain has seen a single clock edge.  The hold window counts up
+    from 0 instead of down from ``hold`` for the same reason.
+    """
+
+    def __init__(self, *, hold=BOOT_HOLD, wdog_bits=WDOG_BITS):
+        self.hold = int(hold)
+        self.wdog_bits = int(wdog_bits)
+        if self.hold < 1:
+            raise ValueError(f"hold must be >= 1, got {hold!r}")
+        if not 1 <= self.wdog_bits <= 32:
+            raise ValueError(f"wdog_bits must be in 1..32, got {wdog_bits!r}")
+        #: ``LOCK`` from the PLL (high once locked).
+        self.i_locked = Signal()
+        #: ``o_halt`` from the core: the program has completed.
+        self.i_halt = Signal()
+        #: Synchronous reset for the core (and for the output shell).
+        self.o_rst = Signal()
+        #: The domain the sequencer runs in; the top drives its ``clk`` with
+        #: the PLL output (a submodule may not define the clock it is given).
+        self.cd = ClockDomain("boot", reset_less=True)
+
+    def elaborate(self, platform):
+        m = Module()
+        m.domains += self.cd
+
+        released = Signal()
+        hold_cnt = Signal(range(max(self.hold, 2)))
+        wdog = Signal(self.wdog_bits)
+        m.d.comb += self.o_rst.eq(~released)
+
+        with m.If(~self.i_locked):
+            # No lock: stay in reset, and never let the watchdog accumulate
+            # cycles that belong to an unlocked (possibly stopped) clock.
+            m.d.boot += [released.eq(0), hold_cnt.eq(0), wdog.eq(0)]
+        with m.Elif(~released):
+            with m.If(hold_cnt == self.hold - 1):
+                # Hold window done: hand the core a running clock.
+                m.d.boot += [released.eq(1), wdog.eq(0)]
+            with m.Else():
+                m.d.boot += hold_cnt.eq(hold_cnt + 1)
+        with m.Else():
+            with m.If(self.i_halt):
+                m.d.boot += wdog.eq(0)
+            with m.Elif(wdog == (1 << self.wdog_bits) - 1):
+                # Watchdog expiry: back into reset for a full hold window.
+                m.d.boot += [wdog.eq(0), released.eq(0), hold_cnt.eq(0)]
+            with m.Else():
+                m.d.boot += wdog.eq(wdog + 1)
+
+        return m
+
+
+class FullTop(Elaboratable):
+    """Full-chip top: 25 MHz board clock -> :class:`Pll` -> 60 MHz core (M9b).
+
+    This is the one top that is a whole chip rather than a measurement shell:
+    the Colorlight 5A-75B supplies 25 MHz, the core was closed at 60 MHz, so
+    the PLL is part of the design, not a lab fixture.  ``CoreTop`` (which takes
+    its 60 MHz clock from the synthesis tool's constraint) stays the reference
+    for the core's own resources and fmax; this top adds what the FPGA really
+    needs and is measured through the same flow so the two are comparable.
+
+    Structure::
+
+        clk (25 MHz) -> EHXPLLL (CLKI_DIV=1, CLKFB_DIV=24, CLKOP_DIV=10)
+                          |-> CLKOP  60.000 MHz -> core ``sync`` domain
+                          |                     -> ``measure`` shell domain
+                          |                     -> ``boot`` sequencer domain
+                          `-> LOCK -> BootReset -> core i_rst
+
+    Domains: the core owns its reset-bearing ``sync`` domain and the top only
+    drives that domain's clock (``core.cd.clk``), exactly as ``CoreTop`` does
+    -- a second ``sync`` domain in the top would be a conflict, and the core
+    must stay droppable into another top unchanged.  ``BootReset`` runs in a
+    reset-less ``boot`` domain and the output shell in a ``measure`` domain
+    (same clock, ``rst = boot.o_rst``), so the three names all resolve to the
+    PLL output net, which nextpnr promotes to one primary clock.
+
+    Reset: nothing on this board resets the PLL (``PLLRST_ENA = "DISABLED"``);
+    the core's reset comes from ``BootReset`` -- held while ``LOCK`` is low,
+    held :data:`BOOT_HOLD` clocks more after it rises, then released.  If the
+    core then stops retiring without halting, the watchdog re-resets it after
+    ``2**WDOG_BITS`` clocks (1.12 s at 60 MHz), so a hang restarts the program
+    instead of parking the board.
+
+    Program: the same :data:`CORE_TOP_PROGRAM` image and the same 16-word
+    instruction EBR as ``CoreTop``, so LUT/FF/EBR/DSP and CPI are directly
+    comparable.  :func:`_program` (the 1024-word non-zero image the unit tops
+    preload) is untouched; the core tops keep the short real program because
+    they must actually run it.
+
+    Outputs: the core's retire trace, PC and HALT are registered once more in
+    the ``measure`` domain (one cycle of port-to-port latency, as in
+    ``CoreTop``), so the ports are driven by FFs and nextpnr measures the
+    core's interior paths.  ``o_locked`` is the raw LOCK bit, combinationally
+    -- it is a status signal (pin/LED), not data, and delaying it by a clock
+    would make "did the PLL ever lock" harder to observe.
+
+    Synthesis only: the PLL instance has no simulator model, so this top is
+    exercised through its parts -- :class:`BootReset` is simulated directly and
+    the PLL parameters/instances are checked structurally in
+    ``tests/test_full.py``.
+    """
+
+    def __init__(self, program=None):
+        self.program = list(CORE_TOP_PROGRAM if program is None else program)
+        self.pll = Pll()
+        self.core = Core(self.program)
+        self.boot = BootReset()
+        #: 25 MHz board oscillator: the *first* port, and named ``clk`` because
+        #: ``tools/synth.py`` constrains ``FREQUENCY NET "clk"``.
+        self.clk = Signal()
+        self.o_locked = Signal()
+        self.o_pc = Signal(16)
+        self.o_retire = Signal(1)
+        self.o_retire_pc = Signal(16)
+        self.o_retire_we = Signal(1)
+        self.o_retire_rd = Signal(4)
+        self.o_retire_value = Signal(isa.WIDTH)
+        self.o_halt = Signal(1)
+        self.ports = [self.clk, self.o_locked, self.o_pc, self.o_retire,
+                      self.o_retire_pc, self.o_retire_we, self.o_retire_rd,
+                      self.o_retire_value, self.o_halt]
+
+    def elaborate(self, platform):
+        m = Module()
+        m.submodules.pll = pll = self.pll
+        m.submodules.boot = boot = self.boot
+        m.submodules.core = core = self.core
+
+        m.d.comb += [
+            # 25 MHz reference into the PLL, 60 MHz CLKOP out of it.  CLKOP
+            # drives every registered domain in this design, so nextpnr sees
+            # exactly one synchronous clock net (plus the pad net feeding
+            # CLKI, which no FF is clocked by).
+            pll.i_clk.eq(self.clk),
+            boot.cd.clk.eq(pll.o_clk),
+            core.cd.clk.eq(pll.o_clk),
+            # Lock gating: the only reset the core ever sees.
+            boot.i_locked.eq(pll.o_locked),
+            boot.i_halt.eq(core.o_halt),
+            core.i_rst.eq(boot.o_rst),
+            self.o_locked.eq(pll.o_locked),
+        ]
+
+        # Output shell: registered, same clock, reset from the sequencer (a
+        # separate domain object because the core owns ``sync``).
+        cd = ClockDomain("measure")
+        m.domains += cd
+        m.d.comb += [cd.clk.eq(pll.o_clk), cd.rst.eq(boot.o_rst)]
+
+        m.d.measure += [
+            self.o_pc.eq(core.o_pc),
+            self.o_retire.eq(core.o_retire),
+            self.o_retire_pc.eq(core.o_retire_pc),
+            self.o_retire_we.eq(core.o_retire_we),
+            self.o_retire_rd.eq(core.o_retire_rd),
+            self.o_retire_value.eq(core.o_retire_value),
+            self.o_halt.eq(core.o_halt),
         ]
 
         return m
