@@ -334,7 +334,12 @@ def test_full_top_wiring_is_exactly_the_documented_one():
     core_ports = dict(re.findall(r"\.([\\\w$]+)\s*\(([^)]*)\)", v[v.index("\\top.core  core ("):
                                                           v.index("\\top.pll  pll (")]))
     # The retire value's port name is mangled by Amaranth, so find it by stem.
-    value_port = next(k for k in core_ports if "wdata" in k)
+    # The writeback port's Verilog name depends on how the register file
+    # consumes it: the flop file's write-through mux mangles ``i_wdata`` into
+    # ``i_wdata$N``, while the RAM file drives ``w_value`` straight into the
+    # memory write port, so the port keeps its name.  Accept either.
+    value_port = next(k for k in core_ports
+                      if "wdata" in k or k == "w_value")
     for out, port in (("o_pc", "o_pc"), ("o_retire", "w_valid"),
                       ("o_retire_pc", "o_retire_pc"),
                       ("o_retire_we", "o_retire_we"),

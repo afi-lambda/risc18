@@ -43,6 +43,7 @@ Rules:
 | M8 | `feat/m8-multiplier` | `risc18.mul.Multiplier` + DSP measurement | Products match golden for edge/random operands; one `MULT18X18D` and no LUT multiplier in the DSP tops (the core claim rests on `docs/metrics/m8_core.md`); registered-DSP variant measured, golden-clean and rejected (+1 bubble per MUL, no resolvable gain); core keeps the inline multiply after measuring a +159 LUT4 remap cost for the submodule form |
 | M9 | `feat/m9-timing` | Timing closure + resource report | Control transfer resolved in X with a registered redirect; CoreTop fmax ≥ 60 MHz at the 60 MHz constraint across a seed sweep; full top with a 25->60 MHz PLL (M9b); LUT/FF/EBR/DSP table in `docs/metrics/m9_core.md` and `docs/RESULTS.md` (M9b); critical path documented; all tests green |
 | M10 | `feat/m10-fetch-decode` | Decode moved into F (19 decoder fields registered with the FD bundle) | D starts from registered state; ISA and CPI unchanged; CoreTop 71.0/75.6/72.1/73.6 MHz, 1640 LUT4, 640 FF; seed-1 and worst-seed both 65.82 -> 71.03 MHz; M10 seed 2 (75.59 MHz) is the fastest single build, M9's best seed was 73.89 MHz; metrics in `docs/metrics/m10_core.md` |
+| M11 | `feat/m11-ram-regfile` | Optional distributed-RAM register file (10 x `TRELLIS_DPR16X4`, no EBR) | `Core(ram_rf=True)`; -267 LUT4 / -225 FF vs the flop file at -3.2 MHz mean; registered reads, W/W-1 bypasses, no reset clear; flop file remains the default |
 
 ## Worker protocol
 

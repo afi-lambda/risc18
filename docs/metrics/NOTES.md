@@ -281,3 +281,52 @@ So the single 5.47 ns hop seen in the M9 FullTop seed-1 path was placement luck,
 not a structural defect, and chasing it per build is not a design improvement:
 the swing (+3.1 / -6.3 MHz) is the same order as the seed spread. The protocol
 stays "four seeds, quote the worst".
+
+## M11: RAM register file (distributed `TRELLIS_DPR16X4`, not EBR)
+
+The core can build its register file from a 16 x 18 Amaranth ``Memory``
+(``Core(ram_rf=True)``, ``risc18.ramrf.RegFileRam``) instead of 270 flops plus
+two 16:1 x 18-bit read muxes.  What yosys actually produces is **two replicated
+banks of five `TRELLIS_DPR16X4` distributed-RAM cells** (10 cells, no EBR, no
+array flops): the memory has one write and two read ports, so the two read ports
+force one replica each, and each replica gets its own write port.
+
+It is *not* an EBR solution.  One DP16KD would hold 16 x 18 bits in about 1 % of
+its capacity, and a true dual-port EBR has only two ports, so it cannot serve
+two reads plus one write per cycle without a third port.  At 16 entries the
+distributed RAM is the primitive the hardware offers.
+
+| build (CoreTop, 60 MHz) | LUT4 | FF | DPR16X4 | fmax seeds 1/2/3/7 | mean | worst |
+|---|---|---|---|---|---|---|
+| M10 flop register file (default) | 1640 | 640 | 0 | 71.03 / 75.59 / 72.14 / 73.61 | 73.09 | 71.03 |
+| M11 RAM register file | **1373** | **415** | 10 | 65.87 / 73.42 / 69.00 / 71.47 | 69.94 | 65.87 |
+
+-267 LUT4 (-16.3 %), -225 FF (-35 %), and 0 EBR either way.  FullTop with the RAM
+file: 1295 LUT4 / 445 FF / 73.40 MHz at seed 1 (flop file: 1620 / 670 / 73.45).
+
+**Cost:** -3.2 MHz mean, -5.2 MHz worst case.  The register-file read path
+leaves the critical path entirely, and the wall moves to two other paths:
+
+* seeds 2/3 and FullTop: `fetch.imem` EBR clock-to-out **5.6 ns** -> decode cone
+  -> FD capture (the M10 "decode in F" path, now exposed);
+* seeds 1/7: `dx_a` -> `MULT18X18D` (3.9 ns) -> branch target adder -> `x_value`.
+
+**Contract differences (why it is not the default):**
+
+1. Reads are registered: the address in cycle *C* appears in *C + 1*.  The core
+   issues the read in F (decode fields are available there since M10) and
+   consumes it in D.  While D is stalled the address is switched to D's own
+   operands, otherwise the release edge would capture the operands of the
+   instruction still in F.
+2. There is no same-cycle write-through, so the operand select carries explicit
+   W and W-1 bypasses (`w_hit`, `wq_hit`); both are needed because the read is
+   sampled one cycle before the value is used.
+3. The array cannot be cleared by the synchronous reset: `DPR16X4` has no reset
+   and the contents come from the bitstream initialisation.  A mid-run reset
+   therefore leaves the registers as they were.  `RegFileRam(clear=True)` adds a
+   16-cycle zeroing sequence on the write port for designs that need the frozen
+   contract, but it needs the reset held for 16 cycles.
+
+The flop file stays the default (fmax first); the RAM file is a one-argument
+option for area- or FF-constrained variants.  `docs/metrics/m11_core_ram.md` and
+`m11_full_ram.md` are the seed-1 RAM runs, `m11_core_flop.md` the flop baseline.

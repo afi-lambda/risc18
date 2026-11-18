@@ -138,6 +138,7 @@ from .decoder import Decoder
 from .dmem import DataMemory
 from .imem import Fetch
 from .pc import BranchTarget
+from .ramrf import RegFileRam
 from .regfile import RegFile
 
 __all__ = ["Core"]
@@ -160,10 +161,13 @@ class _DecodedFields:
 class Core(Elaboratable):
     """F/D/X/M/W risc18 core with a data EBR and the load-use interlock (M6)."""
 
-    def __init__(self, program=(), data=None):
+    def __init__(self, program=(), data=None, ram_rf=False):
         self.program = list(program)
         #: Optional 1024-word data-memory image (padded/truncated by DataMemory).
         self.data = list(data) if data is not None else []
+        #: Use :class:`risc18.ramrf.RegFileRam` (distributed RAM with
+        #: registered reads) instead of the flop :class:`RegFile`.
+        self.ram_rf = ram_rf
 
         #: Synchronous active-high reset, wired to the ``sync`` domain's rst.
         self.i_rst = Signal(1)
@@ -189,7 +193,10 @@ class Core(Elaboratable):
 
         m.submodules.fetch = fetch = Fetch(self.program)
         m.submodules.decoder = decoder = Decoder()
-        m.submodules.regfile = regfile = RegFile()
+        if self.ram_rf:
+            m.submodules.regfile = regfile = RegFileRam()
+        else:
+            m.submodules.regfile = regfile = RegFile()
         m.submodules.alu = alu = ALU()
         m.submodules.branch = branch = BranchUnit()
         m.submodules.target = target = BranchTarget()
@@ -331,6 +338,23 @@ class Core(Elaboratable):
         # instruction behind takes it directly.  A load is excluded: its
         # ``x_value`` is the effective address, not the word, and the word
         # only exists in M (that case stalls below and reads the M bypass).
+        # W-stage registers are declared here because the D-stage operand
+        # select bypasses W and W-1 (the RAM register file form); their
+        # assignments stay in the W section below.
+        w_valid = Signal()
+        w_pc = Signal(PC_WIDTH)
+        w_we = Signal()
+        w_rd = Signal(4)
+        w_value = Signal(isa.WIDTH)
+        w_halt = Signal()
+
+        # ``stall``/``freeze`` and ``halt_q`` are declared here because the RAM
+        # register file's read address depends on ``stall``; their logic stays
+        # in the hazard section below.
+        stall = Signal()
+        freeze = Signal()
+        halt_q = Signal()
+
         x_hit1 = Signal()
         x_hit2 = Signal()
         m.d.comb += [
@@ -345,17 +369,52 @@ class Core(Elaboratable):
                       & d_need2),
         ]
 
-        # rs1/rs2 as the D stage sees them: X (newest) > M > W write-through.
+        # rs1/rs2 as the D stage sees them: X (newest) > M > W > W-1.
         d_rs1 = Signal(isa.WIDTH)
         d_rs2 = Signal(isa.WIDTH)
-        m.d.comb += [
-            d_rs1.eq(Mux(x_hit1, x_value,
-                         Mux(m_hit1, m_value, regfile.o_rs1))),
-            d_rs2.eq(Mux(x_hit2, x_value,
-                         Mux(m_hit2, m_value, regfile.o_rs2))),
-            regfile.i_rs1.eq(o.rs1),
-            regfile.i_rs2.eq(o.rs2),
-        ]
+        if self.ram_rf:
+            # The RAM register file samples its read addresses one cycle before
+            # the operands are needed, so its data races both the W write that
+            # lands on the capturing edge (W-1: a producer four instructions
+            # ahead) and the W write that lands at the end of this cycle (W:
+            # three ahead).  Both are bypassed explicitly; the flop file needed
+            # only the same-cycle write-through, which the RAM cannot do.
+            w_hit1 = Signal()
+            w_hit2 = Signal()
+            wq_hit1 = Signal()
+            wq_hit2 = Signal()
+            wq_valid = Signal()
+            wq_we = Signal()
+            wq_rd = Signal(4)
+            wq_value = Signal(isa.WIDTH)
+            m.d.comb += [
+                d_rs1.eq(Mux(x_hit1, x_value,
+                             Mux(m_hit1, m_value,
+                                 Mux(w_hit1, w_value,
+                                     Mux(wq_hit1, wq_value,
+                                         regfile.o_rs1))))),
+                d_rs2.eq(Mux(x_hit2, x_value,
+                             Mux(m_hit2, m_value,
+                                 Mux(w_hit2, w_value,
+                                     Mux(wq_hit2, wq_value,
+                                         regfile.o_rs2))))),
+                # Addresses come from the F-stage decode: the word being
+                # decoded now is the one that reads its operands in D next.
+                # While D is stalled it does not move, so the address must be
+                # D's own: the data sampled on the stall cycle is what the
+                # instruction in D needs on the cycle the stall lifts.
+                regfile.i_rs1.eq(Mux(stall, o.rs1, decoder.o.rs1)),
+                regfile.i_rs2.eq(Mux(stall, o.rs2, decoder.o.rs2)),
+            ]
+        else:
+            m.d.comb += [
+                d_rs1.eq(Mux(x_hit1, x_value,
+                             Mux(m_hit1, m_value, regfile.o_rs1))),
+                d_rs2.eq(Mux(x_hit2, x_value,
+                             Mux(m_hit2, m_value, regfile.o_rs2))),
+                regfile.i_rs1.eq(o.rs1),
+                regfile.i_rs2.eq(o.rs2),
+            ]
         # Branch compare and target: driven from the X-stage registers (M9a
         # step 2).  ``dx_a`` is rs1, ``dx_rs2`` is rs2 (``dx_b`` is the ALU's B
         # operand, which may be the immediate), ``dx_imm``/``dx_pc`` the target
@@ -418,7 +477,6 @@ class Core(Elaboratable):
         # A load's word does not exist until M (the data EBR output), so a
         # consumer one instruction behind it is the one remaining stall.  Every
         # other X-stage writer is forwarded above, so it costs no bubble.
-        stall = Signal()
         m.d.comb += stall.eq(
             dx_valid & dx_we & dx_mem_read
             & ((d_need1 & (o.rs1 == dx_rd)) | (d_need2 & (o.rs2 == dx_rd)))
@@ -431,8 +489,6 @@ class Core(Elaboratable):
         # (``d_halt``), and a redirect registered from a stalled or squashed
         # cycle can never exist (``take_x`` requires ``dx_valid``, and a
         # stalled instruction never enters X).
-        halt_q = Signal()
-        freeze = Signal()
         m.d.comb += freeze.eq(d_halt | halt_q)
         with m.If(freeze):
             m.d.sync += halt_q.eq(1)
@@ -548,13 +604,6 @@ class Core(Elaboratable):
         ]
 
         # ------------------------------------------------------------- W ---
-        w_valid = Signal()
-        w_pc = Signal(PC_WIDTH)
-        w_we = Signal()
-        w_rd = Signal(4)
-        w_value = Signal(isa.WIDTH)
-        w_halt = Signal()
-
         m.d.sync += [
             w_valid.eq(xm_valid),
             w_pc.eq(xm_pc),
@@ -571,6 +620,22 @@ class Core(Elaboratable):
             regfile.i_wdata.eq(w_value),
             regfile.i_we.eq(w_valid & w_we),
         ]
+
+        if self.ram_rf:
+            # W and W-1 bypasses for the one-cycle-late RAM operands (see the
+            # operand select above).  ``w_we`` implies rd != 0.
+            m.d.comb += [
+                w_hit1.eq(w_valid & w_we & (w_rd == o.rs1) & d_need1),
+                w_hit2.eq(w_valid & w_we & (w_rd == o.rs2) & d_need2),
+                wq_hit1.eq(wq_valid & wq_we & (wq_rd == o.rs1) & d_need1),
+                wq_hit2.eq(wq_valid & wq_we & (wq_rd == o.rs2) & d_need2),
+            ]
+            m.d.sync += [
+                wq_valid.eq(w_valid),
+                wq_we.eq(w_we),
+                wq_rd.eq(w_rd),
+                wq_value.eq(w_value),
+            ]
 
         m.d.comb += [
             self.o_retire.eq(w_valid),
