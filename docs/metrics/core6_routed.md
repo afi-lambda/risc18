@@ -64,9 +64,11 @@ Means: `Core6Top` 78.57 MHz, `Full6Top` 76.81 MHz. Best 83.99, **worst 73.31**.
 
 The PLL + boot sequencer shell changes fmax by a few MHz in both directions
 (its own cost is +109 LUT4 / +30 FF, and `boot` adds a fourth clock domain on
-the same net). Seed-to-seed spread (~7.7 MHz within a top) is larger than the
-systematic Core6-vs-Full6 difference, so the shell is not a timing feature --
-neither top reaches the target, and which one wins depends on the seed.
+the same net). The seed-to-seed spread is larger than the systematic difference:
+4.67 MHz within `Core6Top` (76.20-80.87) and 10.68 MHz within `Full6Top`
+(73.31-83.99), against a mean Core6-vs-Full6 delta of -1.76 MHz. So the shell is
+not a timing feature -- neither top reaches the target, and which one wins
+depends on the seed.
 
 ## (b) Worst path, logic vs routing
 
