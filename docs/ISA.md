@@ -206,16 +206,26 @@ rows match `golden.Machine.trace` for every program, loads included (M6).
 `o_halt` asserts when the HALT instruction retires; fetching is already frozen
 at that point and the PC holds its post-HALT value.
 
-Pipeline (M7+): F (PC register, instruction EBR, FD register), D (decode,
-combinational regfile read, branch/jump resolution, hazard check), X (ALU,
-multiply, link value, LD/ST effective address), M (data EBR, load word), W
+Pipeline (M9+): F (PC register, instruction EBR, FD register), D (decode,
+combinational regfile read, hazard check), X (ALU, multiply, link value, LD/ST
+effective address, branch/jump resolution), M (data EBR, load word), W
 (register writeback). The data EBR is addressed during X, so a store commits on
 the X->M edge and a load's word is on the EBR output during M; D takes a
 register written in M through an M-stage bypass (the ALU result or the load
 word), so only a distance-1 load producer stalls. The EBR output lags the PC
 register by one edge and the FD register adds a second, so an instruction is
-decoded two edges after its PC became the fetch address; a taken branch or a
-jump therefore squashes the two fetch slots already in flight.
+decoded two edges after its PC became the fetch address.
+
+Control transfer (M9+): the branch compare and the target adder run in X, on
+forwarded operands, and their result is registered as a control-transfer
+decision that the fetch unit applies on the following edge. This costs two
+extra slots relative to the M7 arrangement -- a taken branch or jump kills the
+four fetch slots in flight (the two decode/fetch slots plus the two words the
+EBR and FD registers still hold) -- and buys the pipeline's timing: the
+compare -> redirect -> PC mux -> FD capture loop that limited the design to
+~48 MHz no longer exists (76.4 / 65.8 / 73.4 / 74.3 MHz over PnR seeds 1/2/3/7
+at the 60 MHz constraint). Not-taken branches and all non-control instructions
+cost nothing extra.
 
 Hazard policy (M7+): D sees a register value in the same cycle through
 forwarding -- X stage first (its ALU/MUL/link/LUI result), then M (its result
