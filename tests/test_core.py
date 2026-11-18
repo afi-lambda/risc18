@@ -2118,3 +2118,49 @@ def test_core_top_reproduces_the_golden_trace_one_cycle_late():
     assert machine.halted
     assert [(pc, rd, v) for pc, we, rd, v in rows if we and rd != 0] == machine.trace
     assert len(rows) == machine.retired
+
+
+def test_dead_fd_slot_carries_no_decoded_fields():
+    """A slot that is not valid must present a cleared decode bundle.
+
+    The FD bundle is captured in F and cleared whenever a slot is killed
+    (squash, freeze/HALT) or is not yet valid (the post-reset cycle).  Every
+    consumer is validity-gated today, so this invariant is defence in depth --
+    but without this test the whole clear path can be deleted with the suite
+    still green (M10 review).  The program takes a branch, so both squash-killed
+    and live slots are exercised.
+    """
+    program = [
+        addi(1, 0, 3),                 # 0: counter
+        addi(2, 0, 0),                 # 1: accumulator
+        addi(2, 2, 1),                 # 2: acc += 1
+        addi(1, 1, -1),                # 3: counter -= 1
+        br(isa.OP_BNE, 1, 0, -3),      # 4: backward taken branch
+        halt(),                        # 5
+    ]
+    core = Core(program)
+    sim = Simulator(core)
+    sim.add_clock(CLK_PERIOD, domain="sync")
+
+    seen_dead, seen_live = [], []
+
+    async def tb(ctx):
+        ctx.set(core.i_rst, 1)
+        await ctx.tick()
+        ctx.set(core.i_rst, 0)
+        for _ in range(60):
+            await ctx.tick()
+            await ctx.delay(SETTLE)
+            valid = ctx.get(core.fd_valid)
+            bits = 0
+            for sig in core.fd_fields.values():
+                bits |= ctx.get(sig)
+            (seen_live if valid else seen_dead).append(bits)
+
+    sim.add_testbench(tb)
+    sim.run()
+
+    assert seen_dead, "the program never presented an invalid FD slot"
+    assert seen_live, "the program never presented a valid FD slot"
+    assert all(bits == 0 for bits in seen_dead), (
+        f"dead FD slot carried fields: {[b for b in seen_dead if b]}")

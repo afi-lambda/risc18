@@ -208,6 +208,11 @@ class Core(Elaboratable):
         fd_dec = {name: Signal(len(getattr(decoder.o, name)))
                   for name in vars(decoder.o)}
         o = _DecodedFields(fd_dec)
+        #: White-box observability for the "dead slot carries no fields"
+        #: invariant test in ``tests/test_core.py``: the FD validity and the
+        #: captured field bundle are otherwise local to this module.
+        self.fd_valid = None
+        self.fd_fields = fd_dec
 
         # ------------------------------------------------------------- F ---
         # Fetch control is combinational (`fetch.i_*` below).  A redirected
@@ -220,6 +225,7 @@ class Core(Elaboratable):
         # ------------------------------------------------------------- D ---
         fd_valid = Signal()
         fd_pc = Signal(PC_WIDTH)
+        self.fd_valid = fd_valid
 
         # Decode happens here, in F, on the instruction the EBR has registered;
         # the fields land in the FD bundle above.  ``fd_instr`` therefore does

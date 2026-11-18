@@ -238,8 +238,11 @@ The decoder now runs on the instruction the EBR has already registered, and the
 19 `DecodeOutputs` fields are captured into the FD bundle, so every D path
 starts from flops. `fd_instr` disappears: the raw instruction has no consumer
 after decode, so the change is 18 fewer flops for the instruction word and
-+35 flops for the fields (op 4, rd 4, rs1 4, rs2 4, imm 18, alu_op 3, plus the
-single-bit control).
++54 flops for the fields, so +36 predicted against 18 removed and +35
+measured. The bundle is 19 fields / 54 bits: op 4, rd 4, rs1 4, rs2 4, imm 18,
+alu_op 3, shift_amt 4, branch_cond 2, and eleven 1-bit fields (alu_src_imm,
+reg_write, mem_read, mem_write, mul, branch, jump, jump_reg, halt, rs1_used,
+rs2_used).
 
 | build | seeds 1/2/3/7 fmax (MHz) | LUT4 | FF |
 |---|---|---|---|
@@ -262,6 +265,17 @@ setting is consistently better across netlists:
 | `--placer-heap-timingweight 100` | 73.69 | -- |
 | `--placer-heap-critexp 3` | 71.03 | -- |
 | `--tmg-ripup` | 71.03 | -- |
+
+Reproduce with (the `--pnr-arg` passthrough was added after this probe):
+
+```
+.venv/bin/python tools/synth.py --top risc18.tops:CoreTop --name m10_tw50 \
+    --freq 60 --seed 1 --out build_probe \
+    --pnr-arg=--placer-heap-timingweight --pnr-arg=50
+.venv/bin/python tools/synth.py --top risc18.tops:FullTop --name m10f_tw50 \
+    --freq 25 --seed 1 --out build_probe \
+    --pnr-arg=--placer-heap-timingweight --pnr-arg=50
+```
 
 So the single 5.47 ns hop seen in the M9 FullTop seed-1 path was placement luck,
 not a structural defect, and chasing it per build is not a design improvement:
