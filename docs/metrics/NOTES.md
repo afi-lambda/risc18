@@ -195,12 +195,12 @@ Two structural steps were needed; the first alone was not enough.
 ## M9 full top
 
 `docs/metrics/m9_full.md` is `risc18.tops:FullTop`: 25 MHz board clock -> one
-`EHXPLLL` (CLKI_DIV=1, CLKFB_DIV=24, CLKOP_DIV=10 -> 60.000 MHz exactly) -> the
-same `CORE_TOP_PROGRAM` core as `CoreTop`, with a LOCK-gated reset sequencer and
-a 2^26-clock watchdog (`risc18.tops.BootReset`). What this metric covers and
-what it does not:
+`EHXPLLL` (CLKI_DIV=5, CLKFB_DIV=12, CLKOP_DIV=10, CLKOP_CPHASE=4, CLKOP fed
+back -> 60.000 MHz exactly) -> the same `CORE_TOP_PROGRAM` core as `CoreTop`,
+with a LOCK-gated reset sequencer and a 2^26-clock watchdog
+(`risc18.tops.BootReset`). What this metric covers and what it does not:
 
-* Resources (1897 LUT4, 635 FF, 76 CCU2C, 2 DP16KD, 1 MULT18X18D, 1 EHXPLLL)
+* Resources (1780 LUT4, 670 FF, 76 CCU2C, 2 DP16KD, 1 MULT18X18D, 1 EHXPLLL)
   are the *whole chip* for a real application: core + PLL + reset/watchdog
   logic. They are the honest number for "what this design costs on this board",
   and they are not comparable to the unit tops in this directory (those are
@@ -209,24 +209,22 @@ what it does not:
 * `constraint: 25.0 MHz` in the `.md` is the *input* constraint
   (`tools/synth.py` writes its `--freq` value into `FREQUENCY NET "clk"`, and
   the board's oscillator is 25 MHz). It is not the core's clock.
-* The `fmax` line reads `(constraint 600.24 MHz, missed)`. That constraint is
-  nextpnr 0.7-1's own derived value for the PLL output and it is wrong by
-  `CLKOP_DIV`: it derives `f_in * CLKFB_DIV / CLKI_DIV` (600.24 MHz) instead of
-  60.0 MHz, and it flags its derived 6024.1 MHz VCO as out of the legal band.
-  The fmax number is the real post-route result for the generated clock domain
-  (72.36 / 64.16 / 68.00 / 74.45 MHz over seeds 1/2/3/7, worst seed 3.7 ns logic
-  + 11.8 ns routing); the miss verdict means nothing. As with CoreTop, quote the
-  sweep: adding three named alias nets moved individual seeds by several MHz. Fixing the verdict needs a
-  `FREQUENCY NET` line on the CLKOP net, i.e. a `tools/synth.py` change.
+* The `fmax` line reads `(constraint 60.0 MHz, met)`. That is nextpnr's own
+  derived value for the PLL output, and with the corrected divider set it is the
+  design's clock; the 75.0 MHz constraints it also prints are the disabled CLKOS
+  outputs (`f_VCO / 8`), the proof that nextpnr's VCO is 600 MHz. The routed
+  results are 73.67 / 71.80 / 72.26 / 69.42 MHz over seeds 1/2/3/7 (worst seed
+  7.2 ns logic + 7.2 ns routing). Quote the sweep: small netlist changes moved
+  individual seeds by several MHz.
 * Run this top with `--freq 25`, not `--freq 60`: the value goes into the LPF for
   the 25 MHz pad. With `--freq 60` the pad is over-constrained and nextpnr
-  derives 1440.92 MHz for the generated net (routed design identical, 72.36 MHz).
+  derives a proportionally inflated constraint for the generated net.
 * Nothing about the PLL is simulated: `EHXPLLL` has no model in the Yosys ECP5
   library and none in `amaranth.sim`. Lock gating, the hold window and the
   watchdog are simulated through `BootReset` (plain RTL), and the PLL's divider
   parameters are checked structurally on the emitted Verilog and on the packed
-  `top.config` PLL tile words. The `.bit` is produced but has never been loaded
-  on a board: no silicon timing exists for this top.
+  bitstream. This top's `.bit` has never been loaded; the same core on the same
+  PLL *has*, through `HilTop` (`docs/metrics/hil5.md`).
 
 ## M10: decode in F (probe A) and placement sensitivity (probe B)
 
@@ -374,12 +372,13 @@ with the flop file's mux tree in front of it, that hop was hidden.
    `test_clear_walk_latency_matches_the_documented_count`, which pins the count.  While the walk runs the write port belongs to it, so a
    software write in that window is dropped.
 
-The M9 and M10 full-top metric files (`m9_full.md`, `m10_full.md`) predate the
-generator change that annotates nextpnr's derived constraint, so their fmax lines
-still read "missed 600.24 MHz" -- that is nextpnr 0.7-1 deriving
-`f_in * CLKFB_DIV / CLKI_DIV` for the PLL output (see the M9b note above), not a
-missed target.  `m9_full.md` cannot be re-rendered at this head because its RTL
-is M9's; `m10_full.md` reproduces exactly.
+`m9_full.md` was re-rendered in stage 4 with the corrected PLL, so its fmax line
+is a real `(constraint 60.0 MHz, met)` verdict; `m11_full_ram.md` was re-rendered
+the same way (68.16 MHz, met).  `m10_full.md` is an M10-era build of an older
+FullTop RTL that cannot be re-rendered at this head: its constraint column came
+from the PLL divider set stage 4 replaced, so its verdict is meaningless and the
+file is kept only as history (see the M9b note above and `docs/RESULTS.md`,
+"What nextpnr does with the PLL-generated clock").
 
 The flop file stays the default (fmax first, and it keeps the frozen reset
 guarantee). `docs/metrics/m11_core_ram.md`, `m11_full_ram.md` and

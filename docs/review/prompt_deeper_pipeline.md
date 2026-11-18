@@ -84,8 +84,9 @@ instead of four) and one extra cycle of load-use distance.
 
 My arithmetic: 150 / 2.0 = 75 MIPS against 45.5 today (+65 %); break-even CPI at
 150 MHz is 3.30; at a realistic 120 MHz, 60 MIPS (+32 %) with a break-even CPI of
-2.64. The PLL can produce 150.000 MHz exactly (25 x 24 / 4, VCO 600 MHz), just as it
-currently produces 60.000 MHz (25 x 24 / 10).
+2.64. The PLL can produce 150.000 MHz exactly (25 x 30 / 5 with `CLKOP_DIV = 4`,
+VCO 600 MHz), just as it currently produces 60.000 MHz (25 x 12 / 5,
+`CLKOP_DIV = 10`; CLKOP is the feedback signal, so `CLKOP_DIV` sets the VCO).
 
 ## Questions
 

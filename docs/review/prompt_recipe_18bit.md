@@ -41,12 +41,15 @@ Things already tried and **measured**, so they should not be re-proposed as new:
 - **Collapsing the twin branch-target adders** (~1 % LUT4) does not move fmax: the adder
   is on two of four critical paths but never the tail.
 - **265 "constant" LUT4s** in the netlist are a decomposition artefact, not reclaimable.
-- **The PLL** is exact: `CLKI_DIV=1, CLKFB_DIV=24, CLKOP_DIV=10` -> 60.000 MHz, 0 ppm.
+- **The PLL** is exact: `CLKI_DIV=5, CLKFB_DIV=12, CLKOP_DIV=10` with CLKOP fed
+  back -> 60.000 MHz, 0 ppm, VCO 600 MHz (the `ecppll -i 25 -o 60` set).
 - Current risc18 critical path (M11): 6.8 ns logic + 6.8 ns routing = 13.6 ns, i.e.
   consumer's source indices decoded from the instruction -> compare against the
   producer's registered rd/write-enable -> bypass select -> D->X operand register.
-- No bitstream from risc18 has ever been loaded on the board. Every number is static
-  timing; CPI is `amaranth.sim`.
+- The HIL harness (`HilTop`: the same core plus a UART) has been loaded on the
+  board and reports the simulated retire/cycle counts; every *timing* number
+  here is still static timing, and CPI is `amaranth.sim`
+  (`docs/metrics/hil5.md`).
 
 ## Questions
 

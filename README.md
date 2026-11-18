@@ -60,7 +60,7 @@ design.txt              original design brief
 | M6 data EBR and LD/ST | done |
 | M7 forwarding and hazards | done |
 | M8 DSP multiplier | done |
-| M9 timing closure | done (CoreTop 65.8-73.9 MHz, FullTop with PLL 64.2-74.5 MHz; docs/RESULTS.md) |
+| M9 timing closure | done (CoreTop 65.8-73.9 MHz, FullTop with PLL 69.4-73.7 MHz; docs/RESULTS.md) |
 | M10 decode in F | done (CoreTop 71.0-75.6 MHz, 1640 LUT4, 640 FF; docs/metrics/m10_core.md) |
 | Architecture + timing diagrams (`docs/ARCHITECTURE.md`: pipeline, hazards, cycle timelines, both critical paths, and the LUT/delay cost breakdown with `tools/ablations.sh`) | — |
-| M11 RAM register file | done as an option (1183 LUT4, 407 FF, 68.2-75.3 MHz core, 67.6 MHz full chip; flop file stays the default; docs/metrics/NOTES.md) |
+| M11 RAM register file | done as an option (1183 LUT4, 407 FF, 68.2-75.3 MHz core, 68.2 MHz full chip; flop file stays the default; docs/metrics/NOTES.md) |
