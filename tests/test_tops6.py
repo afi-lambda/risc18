@@ -18,6 +18,7 @@ from risc18.pll import Pll
 from risc18.tops import (
     CLKFB6_DIV,
     CLKI6_DIV,
+    CLKOP6_CPHASE,
     CLKOP6_DIV,
     F_OUT6_MHZ,
     Core6Top,
@@ -79,17 +80,19 @@ def test_six_stage_tops_run_the_same_program_as_the_five_stage_ones():
 # --- PLL at exactly 120.000 MHz --------------------------------------------
 
 def test_full6_pll_divider_constants_are_the_exact_120_mhz_set():
-    # f_out = 25 * CLKFB_DIV / (CLKI_DIV * CLKOP_DIV), VCO = 25 * CLKFB_DIV.
-    assert (CLKI6_DIV, CLKFB6_DIV, CLKOP6_DIV) == (1, 24, 5)
+    # ecppll -i 25 -o 120: CLKOP is fed back, so f_out = 25 * 24 / 5 = 120 MHz
+    # and the VCO runs at f_out * CLKOP_DIV = 600 MHz.
+    assert (CLKI6_DIV, CLKFB6_DIV, CLKOP6_DIV, CLKOP6_CPHASE) == (5, 24, 5, 2)
     assert F_OUT6_MHZ == 120.0
 
 
 def test_full6_top_passes_the_exact_120_mhz_set_to_the_pll():
     top = Full6Top()
-    assert (top.pll.clki_div, top.pll.clkfb_div, top.pll.clkop_div) == \
-        (CLKI6_DIV, CLKFB6_DIV, CLKOP6_DIV) == (1, 24, 5)
+    assert (top.pll.clki_div, top.pll.clkfb_div, top.pll.clkop_div,
+            top.pll.clkop_cphase) == \
+        (CLKI6_DIV, CLKFB6_DIV, CLKOP6_DIV, CLKOP6_CPHASE) == (5, 24, 5, 2)
     assert top.pll.f_in_mhz == 25.0
-    assert top.pll.f_pfd_mhz == 25.0
+    assert top.pll.f_pfd_mhz == 5.0
     assert top.pll.f_vco_mhz == 600.0      # same VCO as the 60 MHz top
     assert top.pll.f_out_mhz == 120.0
     # Exact: no frequency error at all, so the target is a real clock and not
@@ -98,10 +101,12 @@ def test_full6_top_passes_the_exact_120_mhz_set_to_the_pll():
 
 
 def test_the_120_mhz_set_is_legal_for_the_shipped_pll_wrapper():
-    # Pll validates PFD/VCO/dividers in __init__; constructing it is the check.
-    # If it ever raises, the divider set (not the wrapper) is what to revisit.
-    pll = Pll(clki_div=1, clkfb_div=24, clkop_div=5)
+    # Pll validates input/PFD/VCO/output/cphase in __init__; constructing it is
+    # the check.  If it ever raises, the divider set (not the wrapper) is what
+    # to revisit.
+    pll = Pll(clki_div=5, clkfb_div=24, clkop_div=5, clkop_cphase=2)
     assert pll.f_out_mhz == 120.0
+    assert pll.f_vco_mhz == 600.0
 
 
 def test_full6_netlist_carries_the_120_mhz_pll_parameters():
@@ -110,8 +115,9 @@ def test_full6_netlist_carries_the_120_mhz_pll_parameters():
     top = Full6Top()
     v = verilog.convert(top, name="top", ports=top.ports)
     assert v.count("EHXPLLL") == 1
-    for param, value in (("CLKI_DIV", "32'd1"),
+    for param, value in (("CLKI_DIV", "32'd5"),
                          ("CLKFB_DIV", "32'd24"),
-                         ("CLKOP_DIV", "32'd5")):
+                         ("CLKOP_DIV", "32'd5"),
+                         ("CLKOP_CPHASE", "32'd2")):
         assert f".{param}({value})" in v, param
     assert '."FEEDBK_PATH"."CLKOP"' in v or '"CLKOP"' in v
