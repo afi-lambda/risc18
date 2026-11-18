@@ -92,15 +92,15 @@ Worst-case path per seed (ns, logic + routing):
 
 | seed | CoreTop | FullTop |
 |---|---|---|
-| 1 | 2.4 + 12.8 = 15.2 | 2.4 + 11.5 = 13.8 |
-| 2 | 2.9 + 11.8 = 14.7 | 3.7 + 11.8 = 15.6 |
+| 1 | 2.4 + 12.8 = 15.2 | 2.4 + 11.5 ≈ 13.8 |
+| 2 | 2.9 + 11.8 = 14.7 | 3.7 + 11.8 ≈ 15.6 |
 | 3 | 6.1 + 8.2 = 14.3 | 2.2 + 12.5 = 14.7 |
 | 7 | 7.2 + 6.3 = 13.5 | 2.5 + 10.9 = 13.4 |
 
 Both tops clear 60 MHz on all four seeds; the tightest result anywhere is
 64.16 MHz (FullTop seed 2, 6.9 % over the constraint, 1.08 ns of period slack);
 CoreTop's worst is 65.82 MHz, 1.47 ns of slack. The two tops trade places seed
-by seed with an 8.0-10.3 MHz spread, so the cross-top difference carries no
+by seed with an 8.1-10.3 MHz spread, so the cross-top difference carries no
 structural meaning: it is the same core plus a PLL that never sits on the logic
 path. The spread itself is the important caveat — small netlist or naming
 changes moved individual seeds by up to 10 MHz during M9, so every number here
@@ -240,7 +240,7 @@ Not measured, and not claimed:
    compares against 600.24 MHz. The routed fmax number is usable; the verdict is
    not. Upstream nextpnr may have fixed this in a later release; the installed
    one is 0.7-1+b3.
-2. **No silicon evidence at 60 MHz.** The PnR margins are 5.81 MHz for
+2. **No silicon evidence at 60 MHz.** The PnR margins are 5.82 MHz for
    `CoreTop` (65.82 vs 60) and 4.16 MHz for `FullTop` (64.16 vs 60) at the worst
    seed. Silicon at 25 °C is usually a little faster than the model and at
    temperature the reverse; nothing here bounds that.

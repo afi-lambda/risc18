@@ -219,7 +219,7 @@ what it does not:
   `FREQUENCY NET` line on the CLKOP net, i.e. a `tools/synth.py` change.
 * Run this top with `--freq 25`, not `--freq 60`: the value goes into the LPF for
   the 25 MHz pad. With `--freq 60` the pad is over-constrained and nextpnr
-  derives 1440.92 MHz for the generated net (routed design unchanged, 71.68 MHz).
+  derives 1440.92 MHz for the generated net (routed design identical, 72.36 MHz).
 * Nothing about the PLL is simulated: `EHXPLLL` has no model in the Yosys ECP5
   library and none in `amaranth.sim`. Lock gating, the hold window and the
   watchdog are simulated through `BootReset` (plain RTL), and the PLL's divider
