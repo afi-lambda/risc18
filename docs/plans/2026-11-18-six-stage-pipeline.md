@@ -111,3 +111,32 @@ rather than running the ladder.
   commands with totals, PR URL, blocker.
 - Measured numbers are not copied from this plan: a worker that measures a different
   number reports the difference and the file it read.
+
+## Outcome (recorded after the run, 2026-11-18)
+
+| stage | PR | result |
+|---|---|---|
+| 0 probes | #18 | measured, merged |
+| 1 `Core6` sim | #19 | 42 tests, CPI 1.846/1.714/2.053 vs 2.64 break-even, taken transfer 5 slots, MUL latency 2 — merged |
+| 2 routed 120 MHz | #20 | **RED**: worst `Full6Top` 73.31 MHz, best 83.99, core-only 76.20-80.87 |
+| 3 HIL harness | #21 | first on-board run: 13 retires / 26 cycles, matching simulation exactly |
+| 3b 6-stage at 120 MHz | — | dropped: stage 2's gate failed |
+| 4 PLL fix | #22 | the shipped PLL was illegal (600 MHz out of a 6 GHz VCO); corrected to the vendor set, board re-validated |
+
+What the six-stage question actually answered: the fetch-side cut works (the
+13.6 ns `imem DOA -> regfile` path is gone from every 6-stage build, and the best
+seed rises 73.48 -> 83.99 MHz, +14 %), but it does not reach 120 MHz, because the
+limiter moves to the X stage (`i_a ->` branch compare carry chain `-> take_x ->
+ct_valid / fetch CE`, or `->` data-EBR address) at 3.8-4.1 ns logic plus 8.7-9.8 ns
+routing. Routing dominates because the EBR columns land ~20 rows from the logic and
+the flow applies no placement constraints — a flow problem before it is an RTL one.
+
+The 150 MHz figure from the stage-0 probes was a bare-top number, as predicted: at
+120 MHz the six-stage machine has ~0 margin on the X cone, and the X stage would
+have to be split (a seventh stage, another squash slot) or the placement constrained
+before the target is reachable.
+
+The PLL finding outranks the pipeline result: until stage 4 the design had never had
+a working 60 MHz clock on hardware, so every "FullTop at 60 MHz" figure in the repo
+was routed against a constraint the PLL could not produce. That is fixed and the
+board re-verified at the corrected set.
