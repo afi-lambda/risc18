@@ -3,7 +3,7 @@
 Stage 1 of `docs/plans/2026-11-18-six-stage-pipeline.md`. `src/risc18/core6.py`
 implements `Core6` (same ports as `Core`), simulation only: no synthesis, no
 routing, no PLL. Everything below is `amaranth.sim` on this head, measured by
-`tests/test_core6.py` (41 tests; suite total 275).
+`tests/test_core6.py` (42 tests; suite total 276).
 
 ## Schedule
 
@@ -48,17 +48,19 @@ closes one cycle before the target word reaches the register.
 
 Break-even at 120 MHz against the 5-stage core's 45.50 MIPS (73.48 MHz / 1.615)
 is CPI 2.64, so all three clear the budget, the worst with 22 % of margin. The
-extra cycles are fully accounted for: +2 slots per taken transfer (2 transfers
-in the 16-word program, 4 in each loop), plus 8 → 9 for the one distance-1 MUL
-consumer in `CORE_TOP_PROGRAM` (word 6 shifts the product of word 5).
+extra cycles are fully accounted for: **one** more killed slot per taken transfer
+(2 transfers in the 16-word program, 4 in each loop; 21 -> 24, 56 -> 60, 35 -> 39),
+plus one bubble for the single distance-1 MUL consumer in `CORE_TOP_PROGRAM`
+(word 6 shifts the product of word 5), which accounts for the remaining cycle of
+the 16-word program's +3.
 
 ## Gates
 
 ```
 .venv/bin/python -m pytest tests/ -p no:cacheprovider -o addopts="" -q
-    275 passed
+    276 passed
 .venv/bin/python -m pytest tests/test_core6.py -p no:cacheprovider -o addopts="" -q
-    41 passed
+    42 passed
 ```
 
 Both register-file builds (`RegFile` and `RegFileRam`) are exercised: the
