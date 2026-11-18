@@ -16,13 +16,22 @@ where each one is testable:
   structural check.
 """
 
+import re
+
 import pytest
 from amaranth import ClockDomain, Elaboratable, Module
 from amaranth.back import verilog
 from amaranth.sim import Simulator
 
 from risc18.pll import CLKFB_DIV, CLKI_DIV, CLKOP_DIV, F_IN_MHZ, F_OUT_MHZ, Pll
-from risc18.tops import CORE_TOP_PROGRAM, BootReset, CoreTop, FullTop
+from risc18.tops import (
+    BOOT_HOLD as PROD_BOOT_HOLD,
+    WDOG_BITS as PROD_WDOG_BITS,
+    CORE_TOP_PROGRAM,
+    BootReset,
+    CoreTop,
+    FullTop,
+)
 
 CLK_PERIOD = 1e-6
 SETTLE = 1e-9
@@ -40,7 +49,7 @@ def test_pll_default_is_exactly_60_mhz():
     assert pll.f_vco_mhz == 600.0
     assert pll.f_out_mhz == 60.0
     # 60.0 MHz is reachable exactly: no frequency error at all.
-    assert pll.error_hz == 0.0
+    assert pll.error_hz() == 0.0
     assert F_OUT_MHZ == 60.0
 
 
@@ -52,7 +61,7 @@ def test_pll_accepts_the_other_exact_divider_set():
     assert pll.f_pfd_mhz == 12.5
     assert pll.f_vco_mhz == 600.0
     assert pll.f_out_mhz == 60.0
-    assert pll.error_hz == 0.0
+    assert pll.error_hz() == 0.0
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -291,3 +300,49 @@ def test_boot_reset_domain_is_reset_less_and_owns_no_clock():
     assert isinstance(dut.cd, ClockDomain)
     assert dut.cd.name == "boot"
     assert dut.cd.rst is None
+
+
+# --- inter-module wiring ---------------------------------------------------
+
+def test_full_top_wiring_is_exactly_the_documented_one():
+    """Every connection that makes this top work is pinned in the Verilog.
+
+    The top is synthesis-only, so these strings are the only automated gate on
+    the wiring: bypassing the PLL, the lock gate, the sequencer reset or the
+    output shell must fail here.
+    """
+    _, v = _full_verilog()
+    # PLL: 25 MHz pad in, CLKOP/LOCK out on the named nets.
+    assert ".i_clk(clk)" in v
+    assert ".o_clk(pll_clk)" in v
+    assert ".o_locked(o_locked)" in v          # PLL LOCK drives the port
+    assert "assign pll_locked = o_locked;" in v
+    # The sequencer sees LOCK and the core's halt, and owns the core's reset.
+    assert ".i_locked(o_locked)" in v        # sequencer lock gate = PLL LOCK
+    assert "assign i_locked = o_locked;" in v
+    assert ".i_halt(i_halt)" in v
+    assert ".o_rst(boot_rst)" in v
+    assert ".rst(boot_rst)" in v             # the core's only reset source
+    # Every registered domain is clocked by the PLL output, none by the pad.
+    assert "assign boot_clk = pll_clk;" in v
+    assert "assign measure_clk = pll_clk;" in v
+    assert "assign measure_rst = boot_rst;" in v
+    assert re.search(r"assign \\clk\$\d+\s*=\s*pll_clk;", v), "core domain not on pll_clk"
+    assert "posedge clk" not in v.split("module \\top")[1]
+
+
+def test_pll_error_is_measured_against_the_requested_target():
+    # error_hz takes its target, so a legal non-60 MHz set is not nonsense.
+    slow = Pll(clkfb_div=24, clkop_div=16)          # 37.5 MHz
+    assert slow.f_out_mhz == pytest.approx(37.5)
+    assert slow.error_hz() == pytest.approx(22.5e6)
+    assert slow.error_hz(37.5) == pytest.approx(0.0)
+
+
+def test_full_top_uses_the_documented_sequencer_constants():
+    # RESULTS/NOTES quote these as design behaviour (8-clock hold, 1.12 s
+    # watchdog), so they must not drift silently.
+    assert (PROD_BOOT_HOLD, PROD_WDOG_BITS) == (8, 26)
+    top = FullTop()
+    assert top.boot.hold == PROD_BOOT_HOLD
+    assert top.boot.wdog_bits == PROD_WDOG_BITS

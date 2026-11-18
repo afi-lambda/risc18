@@ -181,10 +181,13 @@ class Pll(Elaboratable):
         """CLKOP frequency, MHz."""
         return self.f_vco_mhz / self.clkop_div
 
-    @property
-    def error_hz(self):
-        """Absolute error of CLKOP against the requested 60.000 MHz, in Hz."""
-        return abs(self.f_out_mhz - 60.0) * 1e6
+    def error_hz(self, target_mhz=F_OUT_MHZ):
+        """Absolute error of CLKOP against ``target_mhz`` (default 60 MHz), in Hz.
+
+        A method rather than a property, because the target is not fixed for
+        every legal divider set this class accepts.
+        """
+        return abs(self.f_out_mhz - float(target_mhz)) * 1e6
 
     # -- elaboration -------------------------------------------------------
     def elaborate(self, platform):

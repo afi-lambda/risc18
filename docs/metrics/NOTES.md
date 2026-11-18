@@ -180,7 +180,7 @@ Two structural steps were needed; the first alone was not enough.
   (CPI 1.0) are unchanged. That is the price of the clock, and it is the knob to
   revisit if a later design cares more about branch-heavy code than fmax.
 * Residual risk: the tightest seed is 1 at 65.82 MHz, i.e. 5.8 MHz of margin
-  (1.45 ns of a 16.67 ns budget, 8.7%), and the spread across seeds is 8.1 MHz.
+  (1.47 ns of a 16.67 ns budget, 8.8%), and the spread across seeds is 8.1 MHz.
   `docs/metrics/m9_core.md` records the seed-1 run (the tool writes `--seed` into
   the JSON only); the four-seed sweep above is the headline number.
   Every seed's limiter is the D -> X operand-register load through the
@@ -199,7 +199,7 @@ same `CORE_TOP_PROGRAM` core as `CoreTop`, with a LOCK-gated reset sequencer and
 a 2^26-clock watchdog (`risc18.tops.BootReset`). What this metric covers and
 what it does not:
 
-* Resources (2013 LUT4, 635 FF, 76 CCU2C, 2 DP16KD, 1 MULT18X18D, 1 EHXPLLL)
+* Resources (1897 LUT4, 635 FF, 76 CCU2C, 2 DP16KD, 1 MULT18X18D, 1 EHXPLLL)
   are the *whole chip* for a real application: core + PLL + reset/watchdog
   logic. They are the honest number for "what this design costs on this board",
   and they are not comparable to the unit tops in this directory (those are
@@ -213,8 +213,9 @@ what it does not:
   `CLKOP_DIV`: it derives `f_in * CLKFB_DIV / CLKI_DIV` (600.24 MHz) instead of
   60.0 MHz, and it flags its derived 6024.1 MHz VCO as out of the legal band.
   The fmax number is the real post-route result for the generated clock domain
-  (73.88 / 76.88 / 73.84 / 65.88 MHz over seeds 1/2/3/7); the miss verdict means
-  nothing. Fixing the verdict needs a
+  (72.36 / 64.16 / 68.00 / 74.45 MHz over seeds 1/2/3/7, worst seed 3.7 ns logic
+  + 11.8 ns routing); the miss verdict means nothing. As with CoreTop, quote the
+  sweep: adding three named alias nets moved individual seeds by several MHz. Fixing the verdict needs a
   `FREQUENCY NET` line on the CLKOP net, i.e. a `tools/synth.py` change.
 * Run this top with `--freq 25`, not `--freq 60`: the value goes into the LPF for
   the 25 MHz pad. With `--freq 60` the pad is over-constrained and nextpnr

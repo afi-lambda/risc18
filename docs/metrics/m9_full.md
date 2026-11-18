@@ -6,11 +6,11 @@ constraint: 25.0 MHz
 
 | resource | used | total |
 |---|---:|---:|
-| LUT4 | 2013 | 24288 |
+| LUT4 | 1897 | 24288 |
 | TRELLIS_FF | 635 | 24288 |
 | DP16KD | 2 | 56 |
 | MULT18X18D | 1 | 28 |
 
-* fmax `$glbnet$boot_clk`: 73.88 MHz (constraint 600.24 MHz, missed)
+* fmax `$glbnet$boot_clk`: 72.36 MHz (constraint 600.24 MHz, missed)
 
-* critical path: logic 6.1 ns, routing 7.5 ns
+* critical path: logic 2.4 ns, routing 11.5 ns

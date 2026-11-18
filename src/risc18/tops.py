@@ -710,7 +710,7 @@ class CoreTop(Elaboratable):
 
 #: Boot clocks ``FullTop`` keeps the core in reset after ``LOCK`` rises, and
 #: after every watchdog expiry.  Eight 60 MHz clocks (133 ns) is far more than
-#: the core needs to leave its reset state, and it costs four FFs.
+#: the core needs to leave its reset state, and it costs three FFs.
 BOOT_HOLD = 8
 
 #: Watchdog width: ``2**26`` core clocks is 1.12 s at 60 MHz -- long enough for
@@ -858,6 +858,12 @@ class FullTop(Elaboratable):
         #: 25 MHz board oscillator: the *first* port, and named ``clk`` because
         #: ``tools/synth.py`` constrains ``FREQUENCY NET "clk"``.
         self.clk = Signal()
+        #: Named nets for the three inter-module connections that make this top
+        #: work, so ``tests/test_full.py`` can pin them in the emitted Verilog:
+        #: PLL output clock, PLL lock, and the sequencer's core reset.
+        self.pll_clk = Signal()
+        self.pll_locked = Signal()
+        self.boot_rst = Signal()
         self.o_locked = Signal()
         self.o_pc = Signal(16)
         self.o_retire = Signal(1)
@@ -882,20 +888,23 @@ class FullTop(Elaboratable):
             # exactly one synchronous clock net (plus the pad net feeding
             # CLKI, which no FF is clocked by).
             pll.i_clk.eq(self.clk),
-            boot.cd.clk.eq(pll.o_clk),
-            core.cd.clk.eq(pll.o_clk),
+            self.pll_clk.eq(pll.o_clk),
+            self.pll_locked.eq(pll.o_locked),
+            self.boot_rst.eq(boot.o_rst),
+            boot.cd.clk.eq(self.pll_clk),
+            core.cd.clk.eq(self.pll_clk),
             # Lock gating: the only reset the core ever sees.
-            boot.i_locked.eq(pll.o_locked),
+            boot.i_locked.eq(self.pll_locked),
             boot.i_halt.eq(core.o_halt),
-            core.i_rst.eq(boot.o_rst),
-            self.o_locked.eq(pll.o_locked),
+            core.i_rst.eq(self.boot_rst),
+            self.o_locked.eq(self.pll_locked),
         ]
 
         # Output shell: registered, same clock, reset from the sequencer (a
         # separate domain object because the core owns ``sync``).
         cd = ClockDomain("measure")
         m.domains += cd
-        m.d.comb += [cd.clk.eq(pll.o_clk), cd.rst.eq(boot.o_rst)]
+        m.d.comb += [cd.clk.eq(self.pll_clk), cd.rst.eq(self.boot_rst)]
 
         m.d.measure += [
             self.o_pc.eq(core.o_pc),
