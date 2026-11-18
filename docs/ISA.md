@@ -206,15 +206,18 @@ rows match `golden.Machine.trace` for every program, loads included (M6).
 `o_halt` asserts when the HALT instruction retires; fetching is already frozen
 at that point and the PC holds its post-HALT value.
 
-Pipeline (M9+): F (PC register, instruction EBR, FD register), D (decode,
-combinational regfile read, hazard check), X (ALU, multiply, link value, LD/ST
-effective address, branch/jump resolution), M (data EBR, load word), W
-(register writeback). The data EBR is addressed during X, so a store commits on
+Pipeline (M10+): F (PC register, instruction EBR, decode, FD register -- the
+decoder is combinational on the EBR output register and its 19 fields are
+captured with the FD register, so D starts from registered state), D
+(combinational regfile read, hazard check, operand select), X (ALU, multiply,
+link value, LD/ST effective address, branch/jump resolution), M (data EBR, load
+word), W (register writeback). The data EBR is addressed during X, so a store commits on
 the X->M edge and a load's word is on the EBR output during M; D takes a
 register written in M through an M-stage bypass (the ALU result or the load
 word), so only a distance-1 load producer stalls. The EBR output lags the PC
-register by one edge and the FD register adds a second, so an instruction is
-decoded two edges after its PC became the fetch address.
+register by one edge; decode runs on that registered word and its 19 fields are
+captured into the FD register, so D sees decoded fields two edges after the PC
+became the fetch address.
 
 Control transfer (M9+): the branch compare and the target adder run in X, on
 forwarded operands, and their result is registered as a control-transfer
@@ -224,8 +227,8 @@ four fetch slots in flight (the two decode/fetch slots plus the two words the
 EBR and FD registers still hold) -- and buys the pipeline's timing: the
 compare -> redirect -> PC mux -> FD capture loop that limited the design to
 ~48 MHz no longer exists (65.8 / 67.9 / 70.0 / 73.9 MHz over PnR seeds 1/2/3/7
-at the 60 MHz constraint). Not-taken branches and all non-control instructions
-cost nothing extra.
+at the 60 MHz constraint, before the M10 decode retiming). Not-taken branches
+and all non-control instructions cost nothing extra.
 
 Hazard policy (M7+): D sees a register value in the same cycle through
 forwarding -- X stage first (its ALU/MUL/link/LUI result), then M (its result

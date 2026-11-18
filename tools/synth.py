@@ -124,6 +124,9 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--no-pnr", action="store_true",
                     help="stop after yosys (unit tops without a clock)")
+    ap.add_argument("--pnr-arg", action="append", default=[], metavar="ARG",
+                    help="extra nextpnr-ecp5 argument, repeatable "
+                         "(e.g. --pnr-arg=--placer-heap-timingweight --pnr-arg=50)")
     ap.add_argument("--out", default="build")
     args = ap.parse_args()
 
@@ -163,6 +166,7 @@ def main():
             "--lpf-allow-unconstrained",
             "--placer", "heap", "--router", "router2",
             "--report", out / "report.json", "--textcfg", out / "top.config",
+            *args.pnr_arg,
         ], out / f"pnr_seed{args.seed}.log")
         run(["ecppack", "--bootaddr", "0", out / "top.config", out / "top.bit"],
             out / "ecppack.log")

@@ -145,6 +145,18 @@ __all__ = ["Core"]
 PC_WIDTH = 16
 
 
+class _DecodedFields:
+    """Read-only view of the FD decode bundle.
+
+    One ``Signal`` per :class:`risc18.decoder.DecodeOutputs` field, so the
+    pipeline code can keep addressing ``o.rs1``, ``o.imm`` and so on while the
+    values are registered state captured in F rather than a decode cone.
+    """
+
+    def __init__(self, fields):
+        self.__dict__.update(fields)
+
+
 class Core(Elaboratable):
     """F/D/X/M/W risc18 core with a data EBR and the load-use interlock (M6)."""
 
@@ -183,7 +195,24 @@ class Core(Elaboratable):
         m.submodules.target = target = BranchTarget()
         m.submodules.dmem = dmem = DataMemory(self.data)
 
-        o = decoder.o
+        # The decoder runs in F, on the instruction the EBR has already
+        # registered, and its outputs are captured into the FD bundle.  D then
+        # starts every path from flops: the operand compares, the register-file
+        # addresses and the control bits are all registered state, so nothing in
+        # D waits on a decode cone driven by the instruction word.
+        #
+        # This is a pure retiming: the same fields are decoded from the same
+        # instruction, one EBR-output-register earlier.  The FD capture
+        # conditions below (hold on stall, kill on squash, clear when dead) also
+        # clear the bundle, so a killed slot can never present a stale field.
+        fd_dec = {name: Signal(len(getattr(decoder.o, name)))
+                  for name in vars(decoder.o)}
+        o = _DecodedFields(fd_dec)
+        #: White-box observability for the "dead slot carries no fields"
+        #: invariant test in ``tests/test_core.py``: the FD validity and the
+        #: captured field bundle are otherwise local to this module.
+        self.fd_valid = None
+        self.fd_fields = fd_dec
 
         # ------------------------------------------------------------- F ---
         # Fetch control is combinational (`fetch.i_*` below).  A redirected
@@ -196,9 +225,13 @@ class Core(Elaboratable):
         # ------------------------------------------------------------- D ---
         fd_valid = Signal()
         fd_pc = Signal(PC_WIDTH)
-        fd_instr = Signal(isa.WIDTH)
+        self.fd_valid = fd_valid
 
-        m.d.comb += decoder.i_instr.eq(fd_instr)
+        # Decode happens here, in F, on the instruction the EBR has registered;
+        # the fields land in the FD bundle above.  ``fd_instr`` therefore does
+        # not exist any more: the instruction word itself has no consumer once
+        # it has been decoded, and keeping it would only be 18 dead flops.
+        m.d.comb += decoder.i_instr.eq(fetch.o_instr)
 
         # ---- X stage registers (declared here: D's forwarding reads them) ---
         dx_valid = Signal()
@@ -422,22 +455,20 @@ class Core(Elaboratable):
             m.d.sync += [
                 fd_valid.eq(fd_valid),
                 fd_pc.eq(fd_pc),
-                fd_instr.eq(fd_instr),
-            ]
+            ] + [dst.eq(dst) for dst in fd_dec.values()]
         with m.Elif(~squash & fetch_alive & ~freeze):
             m.d.sync += [
                 fd_valid.eq(1),
                 fd_pc.eq(fetch.o_instr_pc),
-                fd_instr.eq(fetch.o_instr),
-            ]
+            ] + [dst.eq(getattr(decoder.o, name))
+                 for name, dst in fd_dec.items()]
         with m.Else():
             # Killed or not-yet-valid slot: clear the payload too, so a stale
             # branch/HALT can never influence the control logic.
             m.d.sync += [
                 fd_valid.eq(0),
                 fd_pc.eq(0),
-                fd_instr.eq(0),
-            ]
+            ] + [dst.eq(0) for dst in fd_dec.values()]
 
         # ------------------------------------------------------------- X ---
         # Every validity that leaves D is qualified by `d_valid`: the slot a

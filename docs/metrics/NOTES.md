@@ -228,3 +228,56 @@ what it does not:
   `top.config` PLL tile words. The `.bit` is produced but has never been loaded
   on a board: no silicon timing exists for this top.
 
+## M10: decode in F (probe A) and placement sensitivity (probe B)
+
+Two experiments from the external speed/area review (`docs/review/`).
+
+**Probe A -- decode retimed into F.** The D-stage loop was
+`instruction -> decode (rd/rs1/hit compare) -> operand select -> dx register`.
+The decoder now runs on the instruction the EBR has already registered, and the
+19 `DecodeOutputs` fields are captured into the FD bundle, so every D path
+starts from flops. `fd_instr` disappears: the raw instruction has no consumer
+after decode, so the change is 18 fewer flops for the instruction word and
++54 flops for the fields, so +36 predicted against 18 removed and +35
+measured. The bundle is 19 fields / 54 bits: op 4, rd 4, rs1 4, rs2 4, imm 18,
+alu_op 3, shift_amt 4, branch_cond 2, and eleven 1-bit fields (alu_src_imm,
+reg_write, mem_read, mem_write, mul, branch, jump, jump_reg, halt, rs1_used,
+rs2_used).
+
+| build | seeds 1/2/3/7 fmax (MHz) | LUT4 | FF |
+|---|---|---|---|
+| M9 (decode in D) | 65.82 / 67.91 / 70.01 / 73.89 | 1813 | 605 |
+| M10 (decode in F) | **71.03 / 75.59 / 72.14 / 73.61** | **1640** | 640 |
+
+-173 LUT4 (-9.5 %), +35 FF, worst seed +5.2 MHz, mean +3.7 MHz, and the seed
+spread narrows from 8.1 to 4.6 MHz. FullTop follows: 73.45 MHz / 1620 LUT4 /
+670 FF at seed 1. CPI is untouched (222 tests, including every cycle-count
+assertion, pass unchanged).
+
+**Probe B -- placement only.** Re-placing the same M10 CoreTop netlist (seed 1)
+with different heap-placer settings moves the result by up to 3 MHz and no
+setting is consistently better across netlists:
+
+| placer setting | CoreTop seed 1 | FullTop seed 1 |
+|---|---|---|
+| default | 71.03 | 73.45 |
+| `--placer-heap-timingweight 50` | 74.09 | 67.18 |
+| `--placer-heap-timingweight 100` | 73.69 | -- |
+| `--placer-heap-critexp 3` | 71.03 | -- |
+| `--tmg-ripup` | 71.03 | -- |
+
+Reproduce with (the `--pnr-arg` passthrough was added after this probe):
+
+```
+.venv/bin/python tools/synth.py --top risc18.tops:CoreTop --name m10_tw50 \
+    --freq 60 --seed 1 --out build_probe \
+    --pnr-arg=--placer-heap-timingweight --pnr-arg=50
+.venv/bin/python tools/synth.py --top risc18.tops:FullTop --name m10f_tw50 \
+    --freq 25 --seed 1 --out build_probe \
+    --pnr-arg=--placer-heap-timingweight --pnr-arg=50
+```
+
+So the single 5.47 ns hop seen in the M9 FullTop seed-1 path was placement luck,
+not a structural defect, and chasing it per build is not a design improvement:
+the swing (+3.1 / -6.3 MHz) is the same order as the seed spread. The protocol
+stays "four seeds, quote the worst".
