@@ -61,3 +61,4 @@ design.txt              original design brief
 | M7 forwarding and hazards | done |
 | M8 DSP multiplier | done |
 | M9 timing closure | done (CoreTop 65.8-73.9 MHz, FullTop with PLL 64.2-74.5 MHz; docs/RESULTS.md) |
+| M10 decode in F | CoreTop 71.0-75.6 MHz, 1640 LUT4, 640 FF (docs/metrics/m10_core.md) |
