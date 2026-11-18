@@ -58,10 +58,15 @@ handshake the project notes require for a UART).
 
 import re
 
-from amaranth import (Cat, ClockDomain, Elaboratable, Instance, Module, Mux,
-                      Signal)
+from amaranth import Cat, ClockDomain, Elaboratable, Module, Mux, Signal
 
 from . import isa
+from .pll import CLKOP_CPHASE as PLL_CLKOP_CPHASE
+from .pll import CLKOP_DIV as PLL_CLKOP_DIV
+from .pll import CLKFB_DIV as PLL_CLKFB_DIV
+from .pll import CLKI_DIV as PLL_CLKI_DIV
+from .pll import F_IN_MHZ as PLL_F_IN_MHZ
+from .pll import F_OUT_MHZ as PLL_F_OUT_MHZ
 
 __all__ = [
     "BAUD",
@@ -75,7 +80,6 @@ __all__ = [
     "LINE_LEN",
     "LINE_SEGMENTS",
     "UART_DIVISOR",
-    "HilPll",
     "HilStatus",
     "UartTx",
     "baud_divisor",
@@ -84,8 +88,27 @@ __all__ = [
     "parse_line",
 ]
 
-#: Core clock the harness is specified against (the PLL output of ``FullTop``).
-CLK_HZ = 60_000_000
+# ---------------------------------------------------------------------------
+# The clock: 25 MHz pad -> 60.000 MHz, the ``ecppll -i 25 -o 60`` instance.
+# ---------------------------------------------------------------------------
+#
+# The PLL itself is :class:`risc18.pll.Pll`: since stage 4 it carries the
+# vendor divider set (CLKI_DIV=5, CLKFB_DIV=12, CLKOP_DIV=10, CLKOP_CPHASE=4,
+# CLKFB tied to CLKOP), so this module no longer needs a private copy.  The
+# names below stay exported for the harness's own arithmetic and for anything
+# that imported them from here; they are the same objects the top's PLL
+# validates.
+
+CLKI_DIV = PLL_CLKI_DIV
+CLKFB_DIV = PLL_CLKFB_DIV
+CLKOP_DIV = PLL_CLKOP_DIV
+CLKOP_CPHASE = PLL_CLKOP_CPHASE
+F_IN_MHZ = PLL_F_IN_MHZ
+F_OUT_MHZ = PLL_F_OUT_MHZ
+
+#: Core clock the harness's baud divisor is computed at (the PLL's CLKOP).
+CLK_HZ = int(round(F_OUT_MHZ * 1e6))
+
 
 #: Line rate, the rate ``tools/hil_status.py`` opens the port at.
 BAUD = 115_200
@@ -178,138 +201,6 @@ def parse_line(raw):
         raise ValueError(f"not a HIL status line: {text!r}")
     retires, cycles, pc, value = (int(group, 16) for group in match.groups())
     return {"retires": retires, "cycles": cycles, "pc": pc, "value": value}
-
-
-# ---------------------------------------------------------------------------
-# The clock: 25 MHz pad -> 60.000 MHz, the ``ecppll -i 25 -o 60`` instance.
-# ---------------------------------------------------------------------------
-
-#: Reference clock of the Colorlight 5A-75B (same oscillator ``risc18.pll`` uses).
-F_IN_MHZ = 25.0
-
-#: ``ecppll -i 25 -o 60``: PFD ``25/5 = 5 MHz``, VCO ``5 * 12 = 600 MHz``,
-#: CLKOP ``600/10 = 60.000 MHz`` (0 Hz error, 0 ppm).
-CLKI_DIV = 5
-CLKFB_DIV = 12
-CLKOP_DIV = 10
-
-#: Static phase shift ecppll emits for ``CLKOP_DIV = 10`` (must be < CLKOP_DIV).
-CLKOP_CPHASE = 4
-
-#: CLKOP frequency of that set, MHz.
-F_OUT_MHZ = F_IN_MHZ * CLKFB_DIV / CLKI_DIV
-
-
-class HilPll(Elaboratable):
-    """25 MHz -> 60.000 MHz ``EHXPLLL``, copied from ``ecppll -i 25 -o 60``.
-
-    Why this class exists at all
-    ----------------------------
-
-    :class:`risc18.pll.Pll` divides twice: ``f_out = f_in * CLKFB_DIV /
-    (CLKI_DIV * CLKOP_DIV)``.  With ``FEEDBK_PATH="CLKOP"`` -- the only feedback
-    path either class uses -- that is not how the loop closes: CLKOP is fed
-    back and divided by ``CLKFB_DIV`` down to the PFD, so the loop locks
-    ``f_CLKOP = f_in * CLKFB_DIV / CLKI_DIV`` and the VCO runs at
-    ``f_CLKOP * CLKOP_DIV``.  ``CLKOP_DIV`` therefore sets the VCO, not the
-    output.  Two independent observations agree:
-
-    * ``nextpnr-ecp5`` on the ``Pll()`` default set (1, 24, 10) prints
-      ``Derived VCO frequency 6024.1 MHz ... out of legal range [400MHz,
-      800MHz]`` and constrains the CLKOP net to 600.2 MHz -- i.e. 600 MHz out,
-      6 GHz VCO, as the loop equation above says;
-    * on the board, a heartbeat design clocked by ``Pll()`` produces no serial
-      output at all, while the same design clocked by this class streams the
-      message continuously (11.5 kB/s at 115 200 baud, measured).
-
-    So a 60 MHz output from a 25 MHz reference needs ``CLKFB_DIV/CLKI_DIV =
-    2.4 = 12/5``, which is what ``ecppll`` emits, along with
-    ``CLKOP_CPHASE=4`` and ``CLKFB`` tied to the CLKOP net.  Changing only the
-    dividers and keeping the rest of ``Pll()`` (``CLKOP_CPHASE=0``, ``CLKFB``
-    tied low, ``ENCLKOP=1``) was *not* enough on this board -- the line came out
-    stuck -- so the vendor's phase/feedback wiring is part of the recipe; the
-    ``ICP_CURRENT``/``LPF_RESISTOR``/``MFG_*`` attributes turned out not to be
-    (a build without them also streams).
-
-    The 5 MHz PFD is below the 10 MHz floor :class:`risc18.pll.Pll` enforces,
-    which is the other reason the correct set could not be expressed through
-    that class; the board locks and runs with it, as measured.
-
-    ``risc18.pll.Pll`` and every other top are left untouched: this class is how
-    *this* harness gets its 60 MHz clock, and ``docs/metrics/hil5.md`` records
-    the measurement that says so.
-    """
-
-    def __init__(self):
-        self.clki_div = CLKI_DIV
-        self.clkfb_div = CLKFB_DIV
-        self.clkop_div = CLKOP_DIV
-        #: 25 MHz reference from the board oscillator (CLKI).
-        self.i_clk = Signal()
-        #: CLKOP: 60.000 MHz, 50 % duty, no phase shift beyond ecppll's cphase.
-        self.o_clk = Signal()
-        #: LOCK: high once the loop has locked.
-        self.o_locked = Signal()
-
-    @property
-    def f_pfd_mhz(self):
-        """Phase-detector frequency, MHz (``f_in / CLKI_DIV``)."""
-        return F_IN_MHZ / self.clki_div
-
-    @property
-    def f_vco_mhz(self):
-        """VCO frequency, MHz (``f_out * CLKOP_DIV``)."""
-        return self.f_out_mhz * self.clkop_div
-
-    @property
-    def f_out_mhz(self):
-        """CLKOP frequency, MHz (``f_in * CLKFB_DIV / CLKI_DIV``)."""
-        return F_IN_MHZ * self.clkfb_div / self.clki_div
-
-    def elaborate(self, platform):
-        m = Module()
-        m.submodules.pll = Instance(
-            "EHXPLLL",
-            # ecppll -i 25 -o 60, verbatim (parameter and port names as yosys'
-            # ecp5/cells_bb.v declares them).
-            p_CLKI_DIV=self.clki_div,
-            p_CLKFB_DIV=self.clkfb_div,
-            p_CLKOP_DIV=self.clkop_div,
-            p_CLKOP_CPHASE=CLKOP_CPHASE,
-            p_CLKOP_FPHASE=0,
-            p_CLKOP_ENABLE="ENABLED",
-            p_CLKOS_ENABLE="DISABLED",
-            p_CLKOS2_ENABLE="DISABLED",
-            p_CLKOS3_ENABLE="DISABLED",
-            p_CLKOS_DIV=8, p_CLKOS2_DIV=8, p_CLKOS3_DIV=8,
-            p_CLKOS_CPHASE=0, p_CLKOS2_CPHASE=0, p_CLKOS3_CPHASE=0,
-            p_CLKOS_FPHASE=0, p_CLKOS2_FPHASE=0, p_CLKOS3_FPHASE=0,
-            p_FEEDBK_PATH="CLKOP",
-            p_CLKOP_TRIM_POL="RISING", p_CLKOP_TRIM_DELAY=0,
-            p_CLKOS_TRIM_POL="RISING", p_CLKOS_TRIM_DELAY=0,
-            p_OUTDIVIDER_MUXA="DIVA", p_OUTDIVIDER_MUXB="DIVB",
-            p_OUTDIVIDER_MUXC="DIVC", p_OUTDIVIDER_MUXD="DIVD",
-            p_PLLRST_ENA="DISABLED", p_INTFB_WAKE="DISABLED",
-            p_STDBY_ENABLE="DISABLED", p_DPHASE_SOURCE="DISABLED",
-            p_INT_LOCK_STICKY="ENABLED", p_SYNC_ENABLE="DISABLED",
-            p_REFIN_RESET="DISABLED",
-            # Charge pump / loop filter settings from the ecppll header.
-            a_ICP_CURRENT="12", a_LPF_RESISTOR="8",
-            a_MFG_ENABLE_FILTEROPAMP="1", a_MFG_GMCREF_SEL="2",
-            i_CLKI=self.i_clk,
-            # ecppll ties CLKFB to the CLKOP net even with FEEDBK_PATH="CLKOP";
-            # a build with CLKFB tied low and CPHASE=0 did not run here.
-            i_CLKFB=self.o_clk,
-            i_RST=0, i_STDBY=0,
-            i_PHASESEL0=0, i_PHASESEL1=0, i_PHASEDIR=1, i_PHASESTEP=1,
-            i_PHASELOADREG=1, i_PLLWAKESYNC=0,
-            # ecppll ties ENCLKOP low; only CLKOP is used.
-            i_ENCLKOP=0, i_ENCLKOS=0, i_ENCLKOS2=0, i_ENCLKOS3=0,
-            o_CLKOP=self.o_clk, o_LOCK=self.o_locked,
-            o_CLKOS=Signal(), o_CLKOS2=Signal(), o_CLKOS3=Signal(),
-            o_INTLOCK=Signal(), o_REFCLK=Signal(), o_CLKINTFB=Signal(),
-        )
-        return m
 
 
 class UartTx(Elaboratable):

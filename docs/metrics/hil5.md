@@ -39,10 +39,10 @@ on the Colorlight 5A-75B over JTAG/SRAM (`openFPGALoader -b colorlight`, never
 | MULT18X18D | 1 | 28 |
 
 * fmax **73.07 MHz** at the 60 MHz the PLL generates (met); critical path
-  6.0 ns logic + 7.7 ns routing. nextpnr derives the CLKOP constraint itself
-  from the PLL parameters — with the ecppll set below it derives 60.0 MHz, so
-  the "met/missed" verdict is finally meaningful (the committed `m9_full.md`
-  rows compare against a derived 600.24 MHz, see the PLL note).
+  6.0 ns logic + 7.7 ns routing. nextpnr derives the CLKOP constraint from the
+  PLL parameters and prints 60.0 MHz (plus 75.0 MHz for the three disabled CLKOS
+  outputs, `f_VCO / 8`), so the verdict is a 60 MHz verdict — the same one the
+  re-rendered `m9_full.md` now carries.
 
 ## On-board result — three configurations, same numbers
 
@@ -69,33 +69,52 @@ harness could only report 26 if `cycles` were cleared with the core and
 counted from the release edge. Board versus simulation: **13/13 retires,
 26/26 cycles (0.00 %), pc 0xf, value 0** — an exact match, not a 5 % one.
 
-## The PLL: `risc18.pll.Pll` does not produce 60 MHz on this board
+## The PLL: why the ecppll set, and what stage 4 changed
 
-`:class:`risc18.pll.Pll`` divides twice — `f_out = f_in * CLKFB / (CLKI *
-CLKOP)` — but with `FEEDBK_PATH="CLKOP"` the feedback divides **CLKOP** down to
-the PFD, so the loop locks `f_out = f_in * CLKFB / CLKI` and `CLKOP_DIV` sets
-the VCO. Consequences, all observed here:
+With `FEEDBK_PATH="CLKOP"` the feedback divider counts **CLKOP**, not the VCO,
+so the loop locks `f_out = f_in * CLKFB / CLKI` and `CLKOP_DIV` sets the VCO.
+The version of `risc18.pll.Pll` this stage started from divided by `CLKOP_DIV`
+a second time (`f_out = f_in * CLKFB / (CLKI * CLKOP)`), which is what the
+measurements here ran into:
 
-* `nextpnr-ecp5` on the `Pll()` default (1, 24, 10) prints
+* `nextpnr-ecp5` on that class's default (1, 24, 10) printed
   `Derived VCO frequency 6024.1 MHz ... out of legal range [400MHz, 800MHz]`
-  and constrains the CLKOP net to 600.2 MHz — a 600 MHz output from a 6 GHz VCO.
-* A heartbeat design clocked by `Pll()` emits nothing at all on the board
+  and constrained the CLKOP net to 600.2 MHz — a 600 MHz output from a 6 GHz
+  VCO, exactly as the loop equation says.
+* A heartbeat design clocked by it emitted nothing at all on the board
   (measured: 0 bytes in 15 s at 115 200; the same heartbeat clocked from the
-  25 MHz pad streams its message, so the pin, the pad clock and the UART are
+  25 MHz pad streams its message, so the pin, the pad clock and the UART were
   not the problem).
 * `ecppll -i 25 -o 60` gives CLKI_DIV=5, CLKFB_DIV=12, CLKOP_DIV=10 (PFD 5 MHz,
-  VCO 600 MHz) with `CLKOP_CPHASE=4` and `CLKFB` tied to CLKOP; that instance
-  streams at 11.5 kB/s in the same heartbeat test, and `nextpnr` now derives
-  60.0 MHz. Changing only the dividers and keeping `CPHASE=0`/`CLKFB=0` was not
-  enough on this board (the line came out stuck), so the vendor's phase and
-  feedback wiring is part of the recipe; dropping the
-  `ICP_CURRENT`/`LPF_RESISTOR`/`MFG_*` attributes made no difference.
-* The 5 MHz PFD is below the 10 MHz floor `Pll()` enforces, which is why the
-  correct set cannot be expressed through that class.
+  VCO 600 MHz) with `CLKOP_CPHASE=4`, `CLKFB` tied to CLKOP and `ENCLKOP` low;
+  that instance streams at 11.5 kB/s in the same heartbeat test. Changing only
+  the dividers and keeping `CPHASE=0`/`CLKFB=0` was not enough on this board
+  (the line came out stuck), so the vendor's phase and feedback wiring is part
+  of the recipe; dropping the `ICP_CURRENT`/`LPF_RESISTOR`/`MFG_*` attributes
+  made no difference.
+* The 5 MHz PFD looked like the blocker because the class had a 10 MHz *PFD*
+  floor. That floor was a misreading: 10 MHz is the datasheet's lower bound for
+  the output/feedback clock, which here is CLKOP at 60 MHz; `ecppll` itself
+  allows 3.125 MHz at the PFD.
 
-`HilPll` in `src/risc18/hil.py` is therefore the ecppll instance verbatim, and
-`HilTop` uses it. `FullTop`, `CoreTop`, `pll.py` and their committed metrics are
-untouched: this note records the measurement, it does not change those tops.
+Stage 3 therefore shipped `risc18.hil.HilPll`, a verbatim copy of the vendor
+instance, so this harness could run while `pll.py` was left alone. **Stage 4
+fixed the class instead**: `risc18.pll.Pll` now ships the 5/12/10/4 set with
+CLKFB tied to CLKOP, validates it against `ecppll`'s bands, rejects the old
+(1, 24, 10) set, and `HilTop` uses it — `HilPll` is gone. The numbers above did
+not move, because the same cell is instantiated either way; the synthesis row
+and the board run were repeated after the switch:
+
+```
+top | risc18.tops:HilTop (Pll, not HilPll)
+resources | 2196 LUT4, 782 FF, 2 DP16KD, 1 MULT18X18D, 1 EHXPLLL
+derived constraint | 60.0 MHz for boot_clk (no out-of-range VCO line)
+fmax | 73.07 MHz (met 60.0), 6.0 ns logic + 7.7 ns routing
+line: bytearray(b'OK retires=000d cycles=0000001a pc=000f value=00000\r\n')
+```
+
+`openFPGALoader -b colorlight build/synth/hil5-board/top.bit` (SRAM, no `-f`);
+`tools/hil_status.py` reports PASS on all four fields.
 
 ## Reproducing the on-board run
 

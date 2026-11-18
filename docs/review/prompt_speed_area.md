@@ -1,5 +1,10 @@
 # risc18: how to raise fmax and cut LUT4 — design review
 
+> Provenance: this is the brief as it was sent, and its tables are the numbers at
+> that head. The FullTop (PLL) rows have since been re-measured with the corrected
+> PLL divider set — 1780 LUT4 / 670 FF, 73.67 / 71.80 / 72.26 / 69.42 MHz over
+> seeds 1/2/3/7 — see `docs/RESULTS.md`.
+
 I built an 18-bit Harvard RISC in Amaranth for a Lattice ECP5 and it now meets its
 target (60 MHz). I have two open goals from the original brief: **maximum clock
 frequency** and **minimum LUT consumption**. I want your ranking of the levers,
@@ -33,8 +38,9 @@ RTL or Verilog.
   operand registers, and the redirect is registered, so a taken transfer costs **four**
   killed fetch slots (CPI 1.615 on a 16-instruction measurement program, 1.600 on a
   5-iteration store/load loop, 1.842 on a 5-iteration counted loop).
-- FullTop = core + one hand-instantiated EHXPLLL (25 -> 60.000 MHz, CLKI_DIV=1,
-  CLKFB_DIV=24, CLKOP_DIV=10) + a boot sequencer holding reset while LOCK is low.
+- FullTop = core + one hand-instantiated EHXPLLL (25 -> 60.000 MHz, CLKI_DIV=5,
+  CLKFB_DIV=12, CLKOP_DIV=10, CLKOP fed back) + a boot sequencer holding reset
+  while LOCK is low.
 
 ## Measured area (CoreTop = core + registered output shell; post-route)
 

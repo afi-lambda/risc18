@@ -16,7 +16,7 @@ from .core6 import Core6
 from .decoder import PACK_WIDTH, Decoder, pack
 from .dmem import DEPTH as DMEM_DEPTH, DataMemory
 from .imem import DEPTH as IMEM_DEPTH, Fetch, InstrMemory
-from .hil import HilPll, HilStatus
+from .hil import HilStatus
 from .mul import Multiplier
 from .pc import BranchTarget, PCUnit
 from .pll import Pll
@@ -813,7 +813,7 @@ class FullTop(Elaboratable):
 
     Structure::
 
-        clk (25 MHz) -> EHXPLLL (CLKI_DIV=1, CLKFB_DIV=24, CLKOP_DIV=10)
+        clk (25 MHz) -> EHXPLLL (CLKI_DIV=5, CLKFB_DIV=12, CLKOP_DIV=10)
                           |-> CLKOP  60.000 MHz -> core ``sync`` domain
                           |                     -> ``measure`` shell domain
                           |                     -> ``boot`` sequencer domain
@@ -928,17 +928,19 @@ class FullTop(Elaboratable):
 # ---------------------------------------------------------------------------
 
 #: Divider set that turns the 25 MHz board clock into 120.000 MHz exactly:
-#: ``f_out = 25 * 24 / (1 * 5) = 120.000 MHz``, VCO ``= 25 * 24 = 600 MHz``.
-#: Every value is inside the bands :class:`risc18.pll.Pll` checks at
-#: construction time (PFD 25 MHz in 10-400, VCO 600 MHz in 400-800,
-#: ``CLKOP_DIV`` 5 <= 128, counters <= 80), so the wrapper accepts this set
-#: unchanged -- no edit to ``pll.py`` was needed.
-CLKI6_DIV = 1
+#: ``f_CLKOP = 25 * 24 / 5 = 120.000 MHz``, VCO ``= 120 * 5 = 600 MHz``.
+#: CLKOP is the feedback signal, so ``CLKOP_DIV`` sets the VCO, not the
+#: output.  This is ``ecppll -i 25 -o 120`` verbatim -- ``CLKI_DIV 5 /
+#: CLKFB_DIV 24 / CLKOP_DIV 5 / CLKOP_CPHASE 2`` -- and every value is inside
+#: the bands :class:`risc18.pll.Pll` validates (input 25 MHz in 8-400, PFD
+#: 5 MHz in 3.125-400, VCO 600 MHz in 400-800, CLKOP 120 MHz in 10-400).
+CLKI6_DIV = 5
 CLKFB6_DIV = 24
 CLKOP6_DIV = 5
+CLKOP6_CPHASE = 2
 
 #: Output frequency of that divider set, MHz.
-F_OUT6_MHZ = 25.0 * CLKFB6_DIV / (CLKI6_DIV * CLKOP6_DIV)
+F_OUT6_MHZ = 25.0 * CLKFB6_DIV / CLKI6_DIV
 
 
 class Core6Top(Elaboratable):
@@ -1002,19 +1004,20 @@ class Full6Top(Elaboratable):
     """Full-chip six-stage top: 25 MHz board clock -> PLL -> 120.000 MHz core.
 
     Structurally :class:`FullTop` with :class:`risc18.core6.Core6` inside and a
-    PLL divider set changed from ``(1, 24, 10)`` to ``(1, 24, 5)``::
+    PLL divider set changed from ``(5, 12, 10)`` to ``(5, 24, 5)``::
 
-        clk (25 MHz) -> EHXPLLL (CLKI_DIV=1, CLKFB_DIV=24, CLKOP_DIV=5)
+        clk (25 MHz) -> EHXPLLL (CLKI_DIV=5, CLKFB_DIV=24, CLKOP_DIV=5)
                           |-> CLKOP 120.000 MHz -> core ``sync`` domain
                           |                      -> ``measure`` shell domain
                           |                      -> ``boot`` sequencer domain
                           `-> LOCK -> BootReset -> core i_rst
 
-    120.000 MHz is exact (0 Hz error, 0 ppm): the VCO stays at 600 MHz, which is
-    the same VCO the 60 MHz top uses, so only the output divider changes and the
-    lock behaviour of the loop is unchanged.  The set is legal for
-    :class:`risc18.pll.Pll` as shipped -- PFD 25 MHz, VCO 600 MHz,
-    ``CLKOP_DIV = 5 <= 128`` -- so the wrapper accepts it unchanged.
+    120.000 MHz is exact (0 Hz error): with CLKOP fed back, the loop locks
+    ``f_CLKOP = 25 * 24 / 5`` and the VCO runs at ``f_CLKOP * CLKOP_DIV``, so
+    the VCO stays at 600 MHz -- the same VCO the 60 MHz top uses, so only the
+    feedback divider and the output divider change.  The set is
+    ``ecppll -i 25 -o 120`` verbatim (``CLKOP_CPHASE = 2`` follows from
+    ``CLKOP_DIV = 5``) and :class:`risc18.pll.Pll` validates every value.
 
     Reset and watchdog are :class:`BootReset` exactly as in ``FullTop``
     (``BOOT_HOLD`` clocks after LOCK, then release; ``2**WDOG_BITS`` clocks of
@@ -1031,7 +1034,7 @@ class Full6Top(Elaboratable):
     def __init__(self, program=None, ram_rf=False):
         self.program = list(CORE_TOP_PROGRAM if program is None else program)
         self.pll = Pll(clki_div=CLKI6_DIV, clkfb_div=CLKFB6_DIV,
-                       clkop_div=CLKOP6_DIV)
+                       clkop_div=CLKOP6_DIV, clkop_cphase=CLKOP6_CPHASE)
         self.core = Core6(self.program, ram_rf=ram_rf)
         self.boot = BootReset()
         #: 25 MHz board oscillator: the *first* port, named ``clk`` because
@@ -1125,13 +1128,14 @@ class HilTop(Elaboratable):
     watchdog re-reset restarts the measurement instead of leaving a half-sent
     line behind.
 
-    The PLL is :class:`risc18.hil.HilPll` -- the ``ecppll -i 25 -o 60``
-    instance -- and not :class:`risc18.pll.Pll`, which divides by ``CLKOP_DIV``
-    a second time and therefore asks its (1, 24, 10) default set for a 600 MHz
-    CLKOP and a 6 GHz VCO: nextpnr says so, and a heartbeat design clocked by
-    ``Pll()`` produces nothing on this board.  ``HilPll``'s docstring has the
-    measurement, ``docs/metrics/hil5.md`` records it, and ``FullTop`` is
-    untouched so its committed metrics stay comparable.
+    The PLL is :class:`risc18.pll.Pll` with its shipped set, i.e. the
+    ``ecppll -i 25 -o 60`` instance: PFD 5 MHz, CLKOP 60.000 MHz, VCO 600 MHz,
+    ``CLKOP_CPHASE = 4``, ``CLKFB`` tied to the CLKOP net.  Stage 3 could not
+    express that set through ``Pll`` (its arithmetic divided by ``CLKOP_DIV``
+    twice and its 10 MHz "PFD" floor rejected the 5 MHz PFD), so it shipped a
+    private ``HilPll`` copy here; the divider semantics were fixed in stage 4
+    and ``HilPll`` is gone.  ``docs/metrics/hil5.md`` records the on-board
+    measurement this top reproduces.
 
     60 MHz closure: the harness is a 27-bit counter, a 16-bit counter, a
     53-case character mux and a shift-register UART -- three LUT levels off the
@@ -1151,8 +1155,9 @@ class HilTop(Elaboratable):
 
     def __init__(self, program=None, ram_rf=False, divisor=None):
         self.program = list(CORE_TOP_PROGRAM if program is None else program)
-        #: The ecppll 25 -> 60 MHz instance; see the class docstring.
-        self.pll = HilPll()
+        #: The ecppll 25 -> 60 MHz instance, via the shared class; see the
+        #: class docstring and :mod:`risc18.pll`.
+        self.pll = Pll()
         self.core = Core(self.program, ram_rf=ram_rf)
         self.boot = BootReset()
         self.hil = HilStatus() if divisor is None else HilStatus(divisor=divisor)

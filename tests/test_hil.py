@@ -561,45 +561,37 @@ def test_hil_top_wiring_is_exactly_the_documented_one():
     assert v.count("assign uart_tx") == 1 or ".o_tx(uart_tx)" in v
     assert "posedge clk" not in v.split("module \\top")[1]
 
-    # The ecppll 25 -> 60 MHz divider set, not FullTop's (1, 24, 10): see
-    # test_hil_pll_uses_the_set_that_actually_locks_on_the_board.
-    assert (top.pll.clki_div, top.pll.clkfb_div, top.pll.clkop_div) == (5, 12, 10)
+    # The ecppll 25 -> 60 MHz divider set, which is now risc18.pll.Pll's own:
+    # see test_hil_pll_is_the_vendor_instance.
+    assert (top.pll.clki_div, top.pll.clkfb_div, top.pll.clkop_div,
+            top.pll.clkop_cphase) == (5, 12, 10, 4)
     assert top.pll.f_out_mhz == pytest.approx(60.0)
     assert top.pll.f_vco_mhz == pytest.approx(600.0)
 
 
-def test_hil_pll_uses_the_set_that_actually_locks_on_the_board():
-    """``HilPll`` is the ``ecppll -i 25 -o 60`` instance, and why it must be.
+def test_hil_pll_is_the_vendor_instance():
+    """``HilTop`` uses ``risc18.pll.Pll`` with the ``ecppll -i 25 -o 60`` set.
 
     With ``FEEDBK_PATH="CLKOP"`` the feedback divides CLKOP (not the VCO) down
     to the PFD, so the loop locks ``f_out = f_in * CLKFB_DIV / CLKI_DIV`` and
-    the VCO runs at ``f_out * CLKOP_DIV``.  ``risc18.pll.Pll`` divides by
-    ``CLKOP_DIV`` a second time in its own arithmetic, so its (1, 24, 10)
-    default asks for 25*24 = 600 MHz of CLKOP and a 6 GHz VCO -- nextpnr's
-    derived constraint on that build reads 600.2 MHz with "VCO 6024.1 MHz out
-    of legal range", and a heartbeat design clocked by it emits nothing on the
-    board.
+    the VCO runs at ``f_out * CLKOP_DIV``: PFD 5 MHz, CLKOP 60 MHz, VCO
+    600 MHz.  The private ``HilPll`` copy stage 3 needed is gone (stage 4
+    fixed the class instead); the old (1, 24, 10) set -- 600 MHz of CLKOP and
+    a 6 GHz VCO -- is now rejected at construction.
     """
-    from risc18.hil import HilPll
     from risc18.pll import Pll
 
     top = HilTop()
-    assert isinstance(top.pll, HilPll)
-    assert (top.pll.clki_div, top.pll.clkfb_div, top.pll.clkop_div) == (5, 12, 10)
+    assert type(top.pll) is Pll
+    assert (top.pll.clki_div, top.pll.clkfb_div, top.pll.clkop_div,
+            top.pll.clkop_cphase) == (5, 12, 10, 4)
     assert top.pll.f_pfd_mhz == pytest.approx(5.0)
     assert top.pll.f_vco_mhz == pytest.approx(600.0)
     assert top.pll.f_out_mhz == pytest.approx(60.0)
     assert CLK_HZ == pytest.approx(top.pll.f_out_mhz * 1e6)
 
-    # The shipped class cannot even express the working set (its 5 MHz PFD floor
-    # rejects the 12/5 ratio that 60 MHz from 25 MHz needs)...
     with pytest.raises(ValueError):
-        Pll(clki_div=5, clkfb_div=12, clkop_div=10)
-    # ... and on its own default set its model says 60 MHz where the CLKOP
-    # feedback loop gives 600 MHz, i.e. it is off by exactly CLKOP_DIV.
-    assert Pll().f_out_mhz == pytest.approx(60.0)
-    assert F_IN_MHZ * Pll().clkfb_div / Pll().clki_div == pytest.approx(600.0)
-    assert Pll().f_out_mhz * Pll().clkop_div == pytest.approx(600.0)
+        Pll(clki_div=1, clkfb_div=24, clkop_div=10)
 
 
 def test_hil_top_keeps_the_full_top_program_and_core():

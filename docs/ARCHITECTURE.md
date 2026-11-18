@@ -203,7 +203,8 @@ Two different walls in the two configurations, which is why the RAM file is not
 the default: with flops the mux tree is hidden behind the write-through and the
 ALU/multiply side dominates; with distributed RAM the 5.6 ns EBR
 clock-to-out is exposed in front of the read address. FullTop (PLL + boot
-sequencer) measures 73.45 MHz flop / 67.59 MHz RAM at seed 1.
+sequencer) measures 73.67 MHz flop (`m9_full`) / 68.16 MHz RAM (`m11_full_ram`)
+at seed 1, re-measured in stage 4 with the corrected PLL.
 
 ## 5. Reproduce
 
@@ -273,9 +274,10 @@ Delay, from the nextpnr critical-path segments:
 
 The second-worst path in both builds is reset distribution, not datapath: it is
 the first thing you meet above roughly 90 MHz, and it is a fanout problem rather
-than a logic one. FullTop (PLL + boot sequencer) measures 73.45 MHz flop /
-67.59 MHz RAM at seed 1, i.e. on the whole chip the fetch-side chain of the RAM
-build is exposed an extra 6 MHz worse than the core top suggests.
+than a logic one. FullTop (PLL + boot sequencer) measures 73.67 MHz flop /
+68.16 MHz RAM at seed 1 (re-measured in stage 4 with the corrected PLL), i.e. on
+the whole chip the fetch-side chain of the RAM build is exposed an extra 5.5 MHz
+worse than the core top suggests.
 
 Reproduce:
 

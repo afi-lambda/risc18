@@ -10,8 +10,9 @@ reasoning) tokens, $0.087, about 2 minutes.
 1. **"1561 general logic + 126 carry LUT4" is not a decomposition of 1813.**
    The real accounting is 1687 `LUT4` cells (all general logic) plus 126 *sites*
    consumed by 63 `CCU2C` carry cells, i.e. 1687 + 2x63 = 1813. FullTop:
-   1745 + 2x76 = 1897. `docs/RESULTS.md` already states it that way
-   ("logic LUTs / carry LUTs 1687 / 126"); the brief restated it wrongly.
+   1628 + 2x76 = 1780 (re-measured in stage 4; the M10-era netlist this note was
+   written against read 1745 + 2x76 = 1897). `docs/RESULTS.md` states it that
+   way ("logic LUTs / carry LUTs 1628 / 152"); the brief restated it wrongly.
 2. **A 16:1 mux tree has 15 two-input nodes, not 16**, so the two 18-bit read
    ports are 2x18x15 = 540 nodes, not 576. 576 counted the data leaves.
 3. **"78-84 % of every critical path is interconnect" is false.** Measured
@@ -26,11 +27,17 @@ reasoning) tokens, $0.087, about 2 minutes.
   read port, mapped to ~36 RAM LUTs" is not implementable on this device. The
   storage would still be 270 FFs plus two read mux trees. The EBR form
   (one DP16KD, two synchronous read ports) is the version that applies here.
-- **The PLL question is already settled.** `FEEDBK_PATH=CLKOP` with
-  `CLKI_DIV=1 / CLKFB_DIV=24 / CLKOP_DIV=10` gives VCO 600 MHz and CLKOP
-  60.000 MHz; nextpnr's own derived 600.24 MHz is the VCO figure it
-  mislabels as the output. The packed bitstream was decoded word by word
-  (CLKFB_DIV 0010111 = 23, CLKOP_DIV 0001001 = 9, FEEDBK_PATH CLKOP).
+- **The PLL question was *not* settled — the answer was right to ask.** With
+  `FEEDBK_PATH=CLKOP` the feedback divider counts CLKOP, so
+  `CLKI_DIV=1 / CLKFB_DIV=24 / CLKOP_DIV=10` asks for 600 MHz of CLKOP and a
+  6 GHz VCO: nextpnr's `VCO 6024.1 MHz ... out of legal range` was the loop
+  equation, not a mislabel, and a design clocked by it produced nothing on the
+  board. The bitstream decode below (CLKFB_DIV 0010111 = 23, CLKOP_DIV 0001001
+  = 9, `FEEDBK_PATH CLKOP`) was and is correct — it proves what was loaded,
+  not that the loaded set produces 60 MHz. The vendor set is
+  `CLKI_DIV=5 / CLKFB_DIV=12 / CLKOP_DIV=10` with `CLKOP_CPHASE=4`, now what
+  `risc18.pll.Pll` ships and validates (`docs/RESULTS.md`,
+  `docs/metrics/hil5.md`).
 
 ## What the answer got right that changes the plan
 

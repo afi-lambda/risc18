@@ -30,7 +30,9 @@ numbers are post-place-and-route, seed 1 unless a sweep is stated.
   68.24 / 73.44.
 - CPI in `amaranth.sim`: 1.615 (16-word program), 1.600 (store/load loop),
   1.842 (counted loop). Bubbles: 4 slots per taken transfer, 1 per load-use.
-- Nothing has run on the board. Every number is static timing or simulation.
+- No timing number has been measured on the board. (The HIL harness added after
+  this brief does run the same core on the board's PLL and reports the simulated
+  retire/cycle counts: `docs/metrics/hil5.md`.)
 
 Critical paths, both configurations (post-route segments):
 
@@ -84,8 +86,9 @@ instead of four) and one extra cycle of load-use distance.
 
 My arithmetic: 150 / 2.0 = 75 MIPS against 45.5 today (+65 %); break-even CPI at
 150 MHz is 3.30; at a realistic 120 MHz, 60 MIPS (+32 %) with a break-even CPI of
-2.64. The PLL can produce 150.000 MHz exactly (25 x 24 / 4, VCO 600 MHz), just as it
-currently produces 60.000 MHz (25 x 24 / 10).
+2.64. The PLL can produce 150.000 MHz exactly (25 x 30 / 5 with `CLKOP_DIV = 4`,
+VCO 600 MHz), just as it currently produces 60.000 MHz (25 x 12 / 5,
+`CLKOP_DIV = 10`; CLKOP is the feedback signal, so `CLKOP_DIV` sets the VCO).
 
 ## Questions
 

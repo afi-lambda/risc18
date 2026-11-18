@@ -23,7 +23,8 @@ from amaranth import ClockDomain, Elaboratable, Module
 from amaranth.back import verilog
 from amaranth.sim import Simulator
 
-from risc18.pll import CLKFB_DIV, CLKI_DIV, CLKOP_DIV, F_IN_MHZ, F_OUT_MHZ, Pll
+from risc18.pll import (CLKFB_DIV, CLKI_DIV, CLKOP_CPHASE, CLKOP_DIV,
+                        F_IN_MHZ, F_OUT_MHZ, F_VCO_MHZ, Pll)
 from risc18.tops import (
     BOOT_HOLD as PROD_BOOT_HOLD,
     WDOG_BITS as PROD_WDOG_BITS,
@@ -40,47 +41,51 @@ SETTLE = 1e-9
 # --- PLL configuration ------------------------------------------------------
 
 def test_pll_default_is_exactly_60_mhz():
+    # The ecppll -i 25 -o 60 set: CLKOP is fed back, so the loop locks
+    # f_in * CLKFB / CLKI and the VCO runs at that times CLKOP_DIV.
     pll = Pll()
-    assert (pll.clki_div, pll.clkfb_div, pll.clkop_div) == \
-        (CLKI_DIV, CLKFB_DIV, CLKOP_DIV) == (1, 24, 10)
+    assert (pll.clki_div, pll.clkfb_div, pll.clkop_div, pll.clkop_cphase) == \
+        (CLKI_DIV, CLKFB_DIV, CLKOP_DIV, CLKOP_CPHASE) == (5, 12, 10, 4)
     assert F_IN_MHZ == 25.0
     assert pll.f_in_mhz == 25.0
-    assert pll.f_pfd_mhz == 25.0
+    assert pll.f_pfd_mhz == 5.0
     assert pll.f_vco_mhz == 600.0
     assert pll.f_out_mhz == 60.0
     # 60.0 MHz is reachable exactly: no frequency error at all.
     assert pll.error_hz() == 0.0
-    assert F_OUT_MHZ == 60.0
+    assert (F_OUT_MHZ, F_VCO_MHZ) == (60.0, 600.0)
 
 
 def test_pll_accepts_the_other_exact_divider_set():
-    # CLKI_DIV=2 / CLKFB_DIV=48 / CLKOP_DIV=10 is equally exact (VCO 600 MHz,
-    # PFD 12.5 MHz); it documents that the choice of CLKI_DIV=1 is about PFD
-    # and VCO margin, not about reachability.
-    pll = Pll(clki_div=2, clkfb_div=48, clkop_div=10)
-    assert pll.f_pfd_mhz == 12.5
+    # 5 / 24 / 5 is the 120 MHz top's set: equally exact, same 600 MHz VCO,
+    # 5 MHz PFD.  It documents that the output is set by CLKFB_DIV/CLKI_DIV
+    # and that CLKOP_DIV only chooses the VCO multiple.
+    pll = Pll(clki_div=5, clkfb_div=24, clkop_div=5, clkop_cphase=2)
+    assert pll.f_pfd_mhz == 5.0
     assert pll.f_vco_mhz == 600.0
-    assert pll.f_out_mhz == 60.0
-    assert pll.error_hz() == 0.0
+    assert pll.f_out_mhz == 120.0
+    assert pll.error_hz(120.0) == 0.0
 
 
 @pytest.mark.parametrize("kwargs", [
-    {"clkfb_div": 12, "clkop_div": 5},      # exact 60 MHz but VCO = 300 MHz
-    {"clki_div": 8},                        # PFD = 3.125 MHz
+    {"clki_div": 1, "clkfb_div": 24, "clkop_div": 10},   # the old "60 MHz" set
+    {"clkfb_div": 12, "clkop_div": 5},      # 60 MHz out but VCO = 300 MHz
     {"clki_div": 0},                        # divider below its legal minimum
     {"clkfb_div": 96},                      # counter above its legal maximum
     {"clkop_div": 129},                     # CLKOP divider above 128
+    {"clkop_cphase": 10},                   # phase shift >= CLKOP_DIV
 ])
 def test_pll_rejects_configurations_out_of_the_ecp5_bands(kwargs):
     with pytest.raises(ValueError):
         Pll(**kwargs)
 
 
-def test_pll_vco_is_the_only_thing_that_decides_the_output():
-    # f_out = f_in * CLKFB_DIV / (CLKI_DIV * CLKOP_DIV), so scaling the pair
-    # keeps the output: the property is what the report's arithmetic relies on.
-    assert Pll(clki_div=2, clkfb_div=48, clkop_div=10).f_out_mhz == 60.0
-    assert Pll(clkfb_div=24, clkop_div=8).f_out_mhz == 75.0
+def test_pll_clkfb_div_clki_div_sets_the_output():
+    # f_out = f_in * CLKFB_DIV / CLKI_DIV: the feedback ratio is the output,
+    # CLKOP_DIV is only the VCO multiple -- the property every report uses.
+    assert Pll(clkfb_div=12, clkop_div=10).f_out_mhz == 60.0
+    assert Pll(clkfb_div=24, clkop_div=5).f_out_mhz == 120.0
+    assert Pll(clkfb_div=24, clkop_div=5).f_vco_mhz == 600.0
 
 
 # --- netlist structure ------------------------------------------------------
@@ -94,9 +99,10 @@ def test_full_top_has_exactly_one_pll_cell_with_the_documented_parameters():
     _, v = _full_verilog()
     assert v.count("EHXPLLL") == 1
     for param, value in (
-        ("CLKI_DIV", "32'd1"),
-        ("CLKFB_DIV", "32'd24"),
+        ("CLKI_DIV", "32'd5"),
+        ("CLKFB_DIV", "32'd12"),
         ("CLKOP_DIV", "32'd10"),
+        ("CLKOP_CPHASE", "32'd4"),
         ("CLKOP_ENABLE", '"ENABLED"'),
         ("CLKOS_ENABLE", '"DISABLED"'),
         ("CLKOS2_ENABLE", '"DISABLED"'),
@@ -108,12 +114,16 @@ def test_full_top_has_exactly_one_pll_cell_with_the_documented_parameters():
         assert f".{param}({value})" in v, param
     # Only CLKOP is enabled, and CLKI is the 25 MHz board clock: the Pll module
     # exposes i_clk (CLKI) and the top connects it to the ``clk`` port.
-    assert ".ENCLKOP(1'h1)" in v
+    assert ".ENCLKOP(1'h0)" in v       # ecppll's value; CLKOP is still driven
     assert ".ENCLKOS(1'h0)" in v
     assert ".CLKI(i_clk)" in v
     assert ".i_clk(clk)" in v
-    assert ".CLKFB(1'h0)" in v          # FEEDBK_PATH=CLKOP: no external feedback
+    # CLKFB is tied to the CLKOP net, as ecppll emits it and as the board run
+    # required; it is the same wire as .CLKOP.
+    assert ".CLKFB(1'h0)" not in v
+    assert ".CLKOP(o_clk)" in v and ".CLKFB(o_clk)" in v
     assert ".RST(1'h0)" in v            # PLLRST_ENA=DISABLED
+    assert ".CLKOP_CPHASE(32'd4)" in v
 
 
 def test_full_top_ports_start_with_the_25_mhz_clock():
@@ -356,11 +366,13 @@ def test_full_top_wiring_is_exactly_the_documented_one():
 
 
 def test_pll_error_is_measured_against_the_requested_target():
-    # error_hz takes its target, so a legal non-60 MHz set is not nonsense.
-    slow = Pll(clkfb_div=24, clkop_div=16)          # 37.5 MHz
-    assert slow.f_out_mhz == pytest.approx(37.5)
-    assert slow.error_hz() == pytest.approx(22.5e6)
-    assert slow.error_hz(37.5) == pytest.approx(0.0)
+    # error_hz takes its target, so a legal non-60 MHz set is not nonsense:
+    # 5 / 8 / 10 is 40 MHz on a 400 MHz VCO.
+    slow = Pll(clkfb_div=8)
+    assert slow.f_out_mhz == pytest.approx(40.0)
+    assert slow.f_vco_mhz == pytest.approx(400.0)
+    assert slow.error_hz() == pytest.approx(20.0e6)
+    assert slow.error_hz(40.0) == pytest.approx(0.0)
 
 
 def test_full_top_uses_the_documented_sequencer_constants():
