@@ -110,6 +110,11 @@ first and last hops are not always the signal names (`i_b$88`, `sq1`, `$signal$7
 **The X stage caps the clock, not the fetch.** In none of the eight 6-stage
 builds does the critical path start at the instruction EBR (`core.fetch.imem.*.DOA*`)
 or end at the fetch register `fq`; the classes above are X (7/8) and M (1/8).
+The fetch stage does appear *inside* three of the `Full6Top` paths, as
+`core.fq_valid_LUT4_C_Z...` fed by the compare chain `core.sq1_LUT4_D_1_Z[5]`
+(6.9 ns at seed 2) before the path runs on to its register -- i.e. the X cone
+drives the FD-capture qualifier, so the fetch stage is the victim of the X
+stage here, not the source of the delay.
 The five-stage control build is the counter-example -- and it is exactly the
 class the fetch register was added to cut:
 
