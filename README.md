@@ -57,5 +57,4 @@ tests/                  pytest suites (Amaranth simulation + golden lockstep)
 | M6 data EBR and LD/ST | done |
 | M7 forwarding and hazards | done |
 | M8 DSP multiplier | done |
-| M9 timing closure | in progress |
-| M9 timing and resource optimization | pending |
+| M9 timing closure | M9a merged pending; M9b (PLL full top, RESULTS.md) in progress |

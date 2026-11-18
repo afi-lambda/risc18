@@ -131,9 +131,11 @@ drop is ~2.4 MHz and any
   image 1.62 -> 1.31; the five-iteration store/load loop of
   tests/test_core.py::test_memory_accumulation_loop 1.51 -> 1.37; independent
   loads remain 1.00.
-* A JAL/JALR link value is never consumed at distance 1 by construction: the
-  jump resolves in D and empties the two younger fetch slots, so the
-  interesting case is the word after the target, which costs nothing.
+* A JAL/JALR link value (pre-M9 note, restated for M9): a taken transfer empties
+  four slots, so the word after the target costs nothing; since M9 the link is
+  `x_value` (dx_pc + 1) forwarded like any ALU result rather than coming off the
+  D-stage compare path, which is why a distance-1 link consumer still costs no
+  bubble.
 
 ## M9 timing closure
 
@@ -146,24 +148,37 @@ Two structural steps were needed; the first alone was not enough.
   FD capture mux -> FD reg`.
 * Step 1 — register the control-transfer decision (compare still in D, redirect
   applied one edge later from a `ct_*` register): 2228 LUT4, 601 FF, 53.29 /
-  55.34 / 58.44 / 57.71 MHz. The long loop is gone, but a new 17.7 ns path
+  55.34 / 58.44 / 57.71 MHz (uncommitted intermediate; measurement only, not
+  reproducible from this head). The long loop is gone, but a new 17.7 ns path
   appears through `dx_a -> MULT18X18D -> x_value select -> operand mux ->
   compare -> take -> control register`; still short of 60 MHz.
 * Step 2 — move the compare and the target adder into X (operands are already
-  forwarded there), keeping the registered redirect: 1829 LUT4, 605 FF,
-  2 DP16KD, 1 DSP, **76.40 / 65.81 / 73.36 / 74.26 MHz** — 4/4 seeds met at the
-  60 MHz constraint, worst seed 15.2 ns against a 16.67 ns budget. Critical path
-  is now register-to-register and routing-dominated (6.0 ns logic, 7.1 ns
-  routing on seed 1): `dx_a` / operand register -> ALU/DSP fanout -> JALR target
-  adder -> `ct_target`.
+  forwarded there), keeping the registered redirect: 1813 LUT4, 605 FF,
+  2 DP16KD, 1 DSP, **65.82 / 67.91 / 70.01 / 73.89 MHz** (seeds 1/2/3/7) —
+  4/4 met at the 60 MHz constraint, worst seed 15.2 ns against a 16.67 ns
+  budget. Every path is register-to-register with no fetch or I/O path, and the
+  limiting path varies by seed and is never the control transfer: seed 1 is
+  `fd_instr -> decode -> rd` into the regfile write enable (2.4 ns logic +
+  12.8 ns routing), seed 2 `alu_op -> regfile.i_we` (2.9 + 11.8), seed 3
+  `dx_a -> MULT18X18D A` (6.1 + 8.2) and seed 7 `dmem DOA -> writeback LUT`
+  (7.2 + 6.3). No seed's worst path terminates at `ct_target`.
+  (Note the PnR spread: an intermediate head measured 76.40 / 65.81 / 73.36 /
+  74.26 MHz on the same structure — removing one dead 16-bit register moved the
+  seeds by up to 10 MHz in both directions, so quote the sweep, never one run.)
 * Cost: a taken branch or jump kills four fetch slots instead of two, so CPI
-  goes 1.31 -> 1.615 on `CORE_TOP_PROGRAM` and 1.74 -> 1.842 on the
-  five-iteration store/load loop; not-taken branches, the load-use interlock
+  goes 1.31 -> 1.615 on `CORE_TOP_PROGRAM`, 1.37 -> 1.60 on
+  `test_memory_accumulation_loop_matches_golden`'s five-iteration store/load
+  loop and 1.42 -> 1.84 on `test_counted_loop_matches_golden`'s counted loop
+  (all three measured on this head and on M8's tree); not-taken branches, the load-use interlock
   (one bubble), distance-1 ALU chains (zero bubbles) and independent loads
   (CPI 1.0) are unchanged. That is the price of the clock, and it is the knob to
   revisit if a later design cares more about branch-heavy code than fmax.
-* Residual risk: the tightest seed is 2 at 65.81 MHz, 1.5 MHz of margin, and
-  the remaining path runs through `BranchTarget`'s uncollapsed twin adder fed
-  from `dx_a`. Collapsing that adder, or registering the operand-select result
-  (the D1/D2 split from the old M9 note), is the next lever if a build on
-  silicon shows less margin than PnR predicts.
+* Residual risk: the tightest seed is 1 at 65.82 MHz, i.e. 5.8 MHz of margin
+  (1.45 ns of a 16.67 ns budget, 8.7%), and the spread across seeds is 8.1 MHz.
+  The limiters are decode -> regfile write enable (seeds 1/2), `dx_a` -> DSP
+  input (seed 3) and the data EBR output -> writeback (seed 7).
+  Levers, in order: a dedicated distance-1 bypass out of `x_value` (a plain D1/D2
+  operand register split would break the zero-bubble distance-1 contract),
+  reducing `dx_a`'s fanout into the DSP and the compare, or a full-top (PLL)
+  re-measure. Collapsing `BranchTarget`'s twin adder is ~1% of the LUT4 budget
+  and would not move fmax.

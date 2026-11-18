@@ -223,7 +223,7 @@ extra slots relative to the M7 arrangement -- a taken branch or jump kills the
 four fetch slots in flight (the two decode/fetch slots plus the two words the
 EBR and FD registers still hold) -- and buys the pipeline's timing: the
 compare -> redirect -> PC mux -> FD capture loop that limited the design to
-~48 MHz no longer exists (76.4 / 65.8 / 73.4 / 74.3 MHz over PnR seeds 1/2/3/7
+~48 MHz no longer exists (65.8 / 67.9 / 70.0 / 73.9 MHz over PnR seeds 1/2/3/7
 at the 60 MHz constraint). Not-taken branches and all non-control instructions
 cost nothing extra.
 

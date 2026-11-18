@@ -189,7 +189,7 @@ class Core(Elaboratable):
         # Fetch control is combinational (`fetch.i_*` below).  A redirected
         # fetch needs no special case inside Fetch: the PC moves on the edge
         # and the EBR presents the target's word one edge later, which is what
-        # the two-edge squash window in D accounts for.
+        # the four-slot squash window (d_valid, ~take_x, ct_valid, sq1) covers.
         fetch_alive = Signal()
         m.d.sync += fetch_alive.eq(1)      # 0 only in the post-reset cycle
 
@@ -231,11 +231,9 @@ class Core(Elaboratable):
         # ---- control-transfer register (M9a) -------------------------------
         # The decision, not the compare, drives the fetch: the control transfer
         # resolves in X (step 2) and the redirect is applied from this register
-        # one cycle later, while it sits in M.  ``ct_pc`` is the pc of the
-        # instruction the entry belongs to (kept for debug; it is dead in the
-        # datapath, so synthesis trims it).
+        # one cycle later, while it sits in M.  Only the target is needed: the
+        # pc of the entry would be dead in the datapath, so it is not stored.
         ct_valid = Signal()
-        ct_pc = Signal(PC_WIDTH)
         ct_target = Signal(PC_WIDTH)
 
         #: Registered squash window: ``ct_valid`` and the edge behind it, i.e.
@@ -352,9 +350,11 @@ class Core(Elaboratable):
         # out of the control path: what is left is register -> 18-bit compare
         # -> register.
         #
-        # ``take_x`` is combinational, but its only consumers are the control
-        # register's input, the D -> X validity and the HALT kill below, all one
-        # LUT away, so the compare no longer reaches the fetch or the FD mux.
+        # ``take_x`` is combinational: it reaches the control register's input,
+        # the D -> X validity and the HALT kill only.  Its one combinational
+        # path into F is ``d_halt -> freeze -> fetch.i_hold`` (a single LUT into
+        # an enable); the redirect, the target and the FD capture muxes are all
+        # registered, which is what removed the ~48 MHz loop.
         take_x = Signal()
         m.d.comb += take_x.eq(
             dx_valid & ((dx_branch & branch.o_taken) | dx_link)
@@ -407,7 +407,6 @@ class Core(Elaboratable):
         # The one-cycle control register: written in X, read in M.
         m.d.sync += [
             ct_valid.eq(take_x),
-            ct_pc.eq(dx_pc),
             ct_target.eq(target.o_target),
             sq1.eq(ct_valid),
         ]
@@ -467,8 +466,8 @@ class Core(Elaboratable):
             dx_cond.eq(o.branch_cond),
             dx_jump_reg.eq(o.jump_reg),
             dx_halt.eq(d_issue & o.halt),
-            dx_mem_read.eq(o.mem_read),
-            dx_mem_write.eq(o.mem_write),
+            dx_mem_read.eq(d_issue & o.mem_read),
+            dx_mem_write.eq(d_issue & o.mem_write),
         ]
 
         m.d.comb += [
