@@ -106,22 +106,26 @@ up to 10 MHz, so every number here is a sweep, never a single run.
 
 ## Critical paths
 
-Every reported path is register-to-register with no fetch/redirect or I/O path,
-and the worst one varies by seed. The common shapes are:
+Every reported path is register-to-register with no fetch/redirect or I/O path.
+In all four CoreTop seeds the worst path ends by loading a D -> X operand
+register through the forward/hazard select, and the shapes are:
 
-* **decode / writeback**: `fd_instr` → decoder (`rd`) → operand-forward select →
-  `dx_a`, or the same cone into `regfile.i_we` (CoreTop seeds 1/2, 2.4-2.9 ns of
-  logic against 11.8-12.8 ns of routing).
-* **DSP input**: `dx_a` → `MULT18X18D` A→P → `x_value` select → `d_rs1`
-  (CoreTop seed 3, 6.1 + 8.2 ns).
-* **data EBR → writeback**: `dmem` `DOA` → writeback select (CoreTop seed 7,
-  7.2 + 6.3 ns).
-* FullTop repeats the same shapes with the boot sequencer's FFs in place of the
-  core's boundary registers (seed 1 `fmax` path 6.1 + 7.5 ns; seed 7 the
-  12.3 ns-routing decode cone).
+* **CoreTop seed 1** (2.4 + 12.8 = 15.2 ns): `i_instr` -> `rd`/decoder ->
+  `xm_we` cone -> `d_rs2` select -> `dx_b`.
+* **CoreTop seed 2** (2.9 + 11.8 = 14.7 ns): `i_instr` -> `alu_op` ->
+  `regfile.i_we` cone -> `d_rs2` -> `dx_b`.
+* **CoreTop seed 3** (6.1 + 8.2 = 14.3 ns): `dx_a` -> `MULT18X18D` A -> P5 ->
+  `o_target` adder -> `x_value` -> `d_rs2` -> `dx_b`.
+* **CoreTop seed 7** (7.2 + 6.3 = 13.5 ns): `dmem` `DOA` -> LUT -> `o_target`
+  carry chain -> `d_rs1` -> `dx_a`.
+* **FullTop** repeats these shapes with the boot sequencer's registers at one
+  end (seed 1: 6.1 + 7.5 = 13.6 ns; seed 7: 2.9 + 12.3 = 15.2 ns, the routing
+  cone into `dx_b`).
 
-No seed's worst path terminates at `ct_target` any more: the control-transfer
-decision is registered and never on the limiting cone.
+So the limiter is the operand select itself. The branch-target adder
+(`o_target`) is on the seed-3 and seed-7 paths but is never their tail, and no
+path ends at `ct_target`: registering the control transfer removed that loop for
+good.
 
 Nothing in either top crosses clock domains: the 25 MHz net only reaches the
 PLL's `CLKI` pin, so nextpnr reports exactly one timed clock
