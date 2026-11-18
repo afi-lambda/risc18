@@ -199,7 +199,7 @@ same `CORE_TOP_PROGRAM` core as `CoreTop`, with a LOCK-gated reset sequencer and
 a 2^26-clock watchdog (`risc18.tops.BootReset`). What this metric covers and
 what it does not:
 
-* Resources (1881 LUT4, 635 FF, 76 CCU2C, 2 DP16KD, 1 MULT18X18D, 1 EHXPLLL)
+* Resources (2013 LUT4, 635 FF, 76 CCU2C, 2 DP16KD, 1 MULT18X18D, 1 EHXPLLL)
   are the *whole chip* for a real application: core + PLL + reset/watchdog
   logic. They are the honest number for "what this design costs on this board",
   and they are not comparable to the unit tops in this directory (those are
@@ -212,8 +212,9 @@ what it does not:
   nextpnr 0.7-1's own derived value for the PLL output and it is wrong by
   `CLKOP_DIV`: it derives `f_in * CLKFB_DIV / CLKI_DIV` (600.24 MHz) instead of
   60.0 MHz, and it flags its derived 6024.1 MHz VCO as out of the legal band.
-  The 71.68 MHz fmax number is the real post-route result for the generated
-  clock domain; the miss verdict means nothing. Fixing the verdict needs a
+  The fmax number is the real post-route result for the generated clock domain
+  (73.88 / 76.88 / 73.84 / 65.88 MHz over seeds 1/2/3/7); the miss verdict means
+  nothing. Fixing the verdict needs a
   `FREQUENCY NET` line on the CLKOP net, i.e. a `tools/synth.py` change.
 * Run this top with `--freq 25`, not `--freq 60`: the value goes into the LPF for
   the 25 MHz pad. With `--freq 60` the pad is over-constrained and nextpnr
