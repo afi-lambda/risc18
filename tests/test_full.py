@@ -329,6 +329,16 @@ def test_full_top_wiring_is_exactly_the_documented_one():
     assert "assign measure_rst = boot_rst;" in v
     assert re.search(r"assign \\clk\$\d+\s*=\s*pll_clk;", v), "core domain not on pll_clk"
     assert "posedge clk" not in v.split("module \\top")[1]
+    # Output shell: each port samples its own core output, through the
+    # registered measure domain (a swapped source must fail here).
+    core_ports = dict(re.findall(r"\.(\w+)\(([^)]*)\)", v[v.index("\\top.core  core ("):
+                                                          v.index("\\top.pll  pll (")]))
+    for out, port in (("o_pc", "o_pc"), ("o_retire_pc", "o_retire_pc"),
+                      ("o_retire_we", "o_retire_we"), ("o_halt", "o_halt")):
+        temp = re.search(rf"\b{out}\s*<=\s*(\\\$\d+)\s*;", v).group(1)
+        src = re.search(rf"{re.escape(temp)}\s*=\s*([^;]+);", v).group(1).strip()
+        assert src == core_ports[port].strip(), (
+            f"{out} samples {src}, not the core's {port} ({core_ports[port]})")
 
 
 def test_pll_error_is_measured_against_the_requested_target():

@@ -53,7 +53,8 @@ primitive). The divider set was chosen so the output is exact:
   `INT_LOCK_STICKY="ENABLED"` keeps a transient unlock from latching the design
   off. `LOCK` is the sole handshake into the core's reset.
 * Bitstream-level confirmation: the packed `top.config` PLL tile words decode to
-  `CLKFB_DIV=23`, `CLKOP_DIV=9`, `CLKOS*_DIV=7` — the trellis encoder stores each
+  `CLKFB_DIV=23`, `CLKOP_DIV=9`, `CLKOS*_DIV=7` (the same words appear in the
+  packed `top.bit` via `ecpunpack`) — the trellis encoder stores each
   divider minus one, i.e. 1 / 24 / 10 as intended — with `MODE EHXPLLL`,
   `CLKOP_ENABLE ENABLED`, `FEEDBK_PATH CLKOP`.
 
@@ -84,7 +85,7 @@ Per-seed fmax (MHz, routed):
 | 2 | 67.91 | 64.16 |
 | 3 | 70.01 | 68.00 |
 | 7 | 73.89 | 74.45 |
-| mean | 69.91 | 69.74 |
+| mean | 69.41 | 69.74 |
 | min | 65.82 | 64.16 |
 
 Worst-case path per seed (ns, logic + routing):
@@ -97,9 +98,9 @@ Worst-case path per seed (ns, logic + routing):
 | 7 | 7.2 + 6.3 = 13.5 | 2.5 + 10.9 = 13.4 |
 
 Both tops clear 60 MHz on all four seeds; the tightest result anywhere is
-64.16 MHz (FullTop seed 2, 6.9 % over the constraint, 0.95 ns of period slack);
+64.16 MHz (FullTop seed 2, 6.9 % over the constraint, 1.08 ns of period slack);
 CoreTop's worst is 65.82 MHz, 1.47 ns of slack. The two tops trade places seed
-by seed with an 8-10 MHz spread, so the cross-top difference carries no
+by seed with an 8.0-10.3 MHz spread, so the cross-top difference carries no
 structural meaning: it is the same core plus a PLL that never sits on the logic
 path. The spread itself is the important caveat — small netlist or naming
 changes moved individual seeds by up to 10 MHz during M9, so every number here
@@ -120,8 +121,9 @@ differ between the tops, and the measured logs are the only acceptable source:
 * **FullTop** repeats the operand-register load on seeds 1, 3 and 7 (seed 1
   `d_rs2` -> `dx_b` at 13.8 ns, seed 3 `d_b`/`d_rs2` -> `dx_b` at 14.7 ns,
   seed 7 `dx_we` -> `d_rs2` -> `dx_b` at 13.4 ns), and seed 2 is different: it
-  is the fetch hold cone, `freeze` -> `fetch.i_hold` -> the PC register's clock
-  enable (3.7 + 11.8 = 15.6 ns), i.e. the squash/hazard path rather than the
+  starts at the regfile output, `i_a` -> `dx_a` -> `i_cond` compare carry chain
+  -> `fetch_alive` -> `freeze` -> `fetch.i_hold` -> the PC register's clock
+  enable (3.7 + 11.8 = 15.6 ns), i.e. the squash/hazard tail rather than the
   operand path. No boot-sequencer register appears on any measurement path.
 
 So on CoreTop the limiter is the operand select; on FullTop it is the operand
@@ -133,8 +135,8 @@ that loop for good.
 Nothing in either top crosses clock domains: the 25 MHz net only reaches the
 PLL's `CLKI` pin, so nextpnr reports exactly one timed clock
 (`$glbnet$boot_clk`, the promoted CLKOP net) and one cross-domain report,
-`posedge $glbnet$boot_clk -> <async>`, measured at 3.9-4.7 ns to the output
-pins across seeds 1/2/3/7.
+`posedge $glbnet$boot_clk -> <async>`, measured at 4.4-5.7 ns to the output
+pins across seeds 1/2/3/7 (worst seed 2 at 5.65 ns).
 
 ## CPI of the measurement programs
 
@@ -181,9 +183,9 @@ as measured:
   constraint, which is a tool change outside this PR.
 * Consequence: the generated clock **cannot** be timed against a 60 MHz
   constraint by this flow. nextpnr's STA number for the domain is real
-  (73.88 MHz seed 1) — the constraint it compares against is not.
+  (72.36 MHz seed 1) — the constraint it compares against is not.
   `docs/metrics/m9_full.md` therefore reads
-  `fmax $glbnet$boot_clk: 73.88 MHz (constraint 600.24 MHz, missed)`, and the
+  `fmax $glbnet$boot_clk: 72.36 MHz (constraint 600.24 MHz, missed)`, and the
   "missed" verdict is an artifact of the derived constraint, not a 60 MHz miss.
 * Fixing it needs an explicit `FREQUENCY NET <CLKOP net> 60 MHz;` line in the
   LPF (or a `--freq` that nextpnr applied to the generated net), i.e. a change
@@ -194,7 +196,7 @@ as measured:
   oscillator is 25 MHz. With the nominal `--freq 60` the input pad is
   over-constrained to 60 MHz and nextpnr then derives 1440.92 MHz for the
   generated domain (`--name m9_full_f60_input`); the routed design is otherwise
-  identical (73.88 MHz, same resources), and both bitstreams pack.
+  identical (72.36 MHz, same resources), and both bitstreams pack.
 * The 60 MHz closure of the core itself is measured where there is no PLL in
   the way: `CoreTop` at `--freq 60`, 4/4 seeds met, worst 65.82 MHz.
 
@@ -225,7 +227,7 @@ Not measured, and not claimed:
   `FullTop` exists. Even with the PLL, what has been run on hardware is nothing:
   no bitstream from this branch has been loaded. The only end-to-end statement
   available is "the flow produces a bitstream and PnR says the core closes at
-  60 MHz with ≥ 5.8 MHz of margin at the worst seed".
+  60 MHz with 5.8 MHz of margin at the worst CoreTop seed".
 * **PLL lock time, jitter, duty cycle.** Derived from the datasheet (600 MHz
   VCO, `/10` output), not measured. `PLL_LOCK_DELAY` is left at the default 200.
 * **The watchdog's 1.12 s period** is `2**26 / 60 MHz` arithmetic on the
@@ -239,13 +241,13 @@ Not measured, and not claimed:
    not. Upstream nextpnr may have fixed this in a later release; the installed
    one is 0.7-1+b3.
 2. **No silicon evidence at 60 MHz.** The PnR margins are 5.81 MHz for
-   `CoreTop` (65.82 vs 60) and 5.88 MHz for `FullTop` (65.88 vs 60) at the worst
+   `CoreTop` (65.82 vs 60) and 4.16 MHz for `FullTop` (64.16 vs 60) at the worst
    seed. Silicon at 25 °C is usually a little faster than the model and at
    temperature the reverse; nothing here bounds that.
 3. **ABC's global remap inside `synth_ecp5` moves the LUT count by ~±100 on
    small design changes.** FullTop's core RTL never changed across this
    milestone, yet its netlist measured 1602, 1740 and 1729 LUT4 cells
-   (nextpnr: 1754, 1892, 2013) as the 30-FF reset sequencer was revised. Cross-top
+   (nextpnr: 1754, 1892, 2013, and 1897 at this head) as the 30-FF reset sequencer was revised. Cross-top
    LUT comparisons below ~100 cells are not meaningful; quote the netlist, not
    the delta.
 4. **The watchdog restart is not a cold reset.** It re-runs the program from a
