@@ -384,3 +384,69 @@ is M9's; `m10_full.md` reproduces exactly.
 The flop file stays the default (fmax first, and it keeps the frozen reset
 guarantee). `docs/metrics/m11_core_ram.md`, `m11_full_ram.md` and
 `m11_core_flop.md` are the seed-1 runs.
+
+## Probe: `EBR -> ALU -> EBR` in one cycle
+
+`src/risc18/probe_ebr_alu_ebr.py` is a measurement-only module (no tests) that
+asks whether a single clock can carry "read EBR, operate, write EBR" on this
+part. Four tops, all at a 100 MHz constraint, seed 1, post-route:
+
+| top | chain | period | fmax |
+|---|---|---:|---:|
+| `ProbeTop` | EBR DO -> 18-bit add -> output FF | 10.3 ns (7.0 + 3.3) | 97.11 MHz |
+| `ProbeW` | EBR DO -> 18-bit add -> EBR write data input | 9.0 ns (7.0 + 2.0) | 111.53 MHz |
+| `ProbeWMux` | 16:1 reg mux select -> add -> EBR write data | 10.4 ns (2.6 + 7.8) | 96.35 MHz |
+| `ProbeWDsp` | EBR DO -> 18x18 multiply -> EBR write data | 13.2 ns (9.5 + 3.7) | 75.76 MHz |
+
+Reproduce with `tools/synth.py --top risc18.probe_ebr_alu_ebr:ProbeW --name
+probe_ebr_alu_ebr_w --freq 100` (likewise `ProbeTop`, `ProbeWMux`,
+`ProbeWDsp`).  Committed reports are `probe_ebr_alu_ebr*.md`; the segment-level
+paths are in `build/synth/<name>/pnr_seed1.log`.
+
+Read the table with two caveats. These tops have no decode, no bypass, no reset
+network and no fanout into the rest of a core, so a real stage built this way
+lands 1-2 ns worse; `ProbeWMux` shows how fast that happens (routing alone went
+from 2.0 to 7.8 ns when the mux tree was added). And `ProbeWMux`'s reported path
+starts at the mux *select* register, which is the register-file-read shape, not
+the fetch shape.
+
+## Probe: EBR read with a registered output
+
+`src/risc18/probe_ebr_read.py`, two tops, seed 1, post-route:
+
+| top | chain | period | fmax |
+|---|---|---:|---:|
+| `ProbeRd` | counter FF -> EBR address, DOA -> fabric FF | 6.7 ns (5.6 + 1.1) | 149.97 MHz |
+| `ProbeRdLoop` | DOA -> next address (one dependent read per cycle) | 6.6 ns (5.6 + 1.0) | 150.78 MHz |
+
+Both were built at a 150 MHz then a 200 MHz constraint and returned the same
+149.97 MHz, so the number is the block's clock-to-out plus one wire and a flop
+setup, not a constraint artefact.  The path in the report is
+`mem.0.0.DOA9 -> o_q_TRELLIS_FF_Q_3.M`, i.e. the read data is registered in
+fabric, not in the block's own output register; that internal register mode is
+what would be needed to go beyond ~150 MHz on a single read stage, and this flow
+does not infer it for these ports.
+
+## Probes: the 6-stage schedule, one composed cone per stage (120 MHz constraint)
+
+`src/risc18/probe_six_stages.py`, seed 1, post-route, bare tops with registered I/O:
+
+| probe | what it is | period | fmax | at 120 MHz |
+|---|---|---:|---:|---|
+| `ProbeFetchIn` | PC -> (+1 adder \| redirect target) mux -> hold gate -> imem AD, DOA -> FF | 6.7 ns (5.6 + 1.1) | 149.93 MHz | closes |
+| `ProbeDstage` | word FF -> decode -> RF address -> DPRAM read -> FF | 2.6 ns on the write-address path; reads shorter | 307-380 MHz | closes, but see caveat |
+| `ProbeXstage` | a,b -> add and 18x18 multiply in parallel -> result select, plus compare and target adder | 9.85 ns (5.5 + 4.3) | 101.62 MHz | **misses** |
+| `ProbeXstageMulReg` | same, multiply result registered before the select tree | 7.7 ns (4.5 + 3.2) | 129.85 MHz | closes, 8 % margin |
+| `ProbeXstageNoMul` | same, no multiply at all | 5.5 ns (1.7 + 3.8) | 181.79 MHz | closes |
+
+The `ProbeXstage` path is `a FF 0.5 -> MULT18X18D 3.9 -> val select tree -> FF`, so the
+multiply is in series with the result select, exactly as the core's flop-build path
+showed. Registering the multiply result is worth 28 MHz (101.62 -> 129.85) and is the
+one schedule change the 6-stage plan did not originally contain: MUL becomes a
+latency-2 operation with a dependent-result interlock, or gets its own stage.
+
+`ProbeDstage` is a shape check, not a budget: with no bypass, no stall mux, no fanout
+and trivial placement it measures far faster than the same cone does inside the core.
+The honest budget for the post-cut D stage is the committed 13.5 ns chain minus the
+5.6 ns EBR read, i.e. ~7.9 ns (~126 MHz), which is marginal at 120 and the reason D
+should be split from decode if the clock target is 150.
