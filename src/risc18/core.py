@@ -6,10 +6,10 @@ The pipeline is F/D/X/M/W, Harvard, word addressed::
                     the PC register by one edge
     D: Decode       instruction from the FD register -> Decoder, combinational
                     RegFile reads (write-through), X and M forwarding,
-                    immediate, branch/jump resolution (BranchUnit +
-                    BranchTarget), load-use hazard check
+                    immediate, load-use hazard check
     X: Execute      ALU (a = rs1, b = imm/rs2/shift amount), 18x18 multiply,
-                    the JAL/JALR link value, and the LD/ST effective address.
+                    the JAL/JALR link value, the LD/ST effective address and
+                    the branch/jump resolution (BranchUnit + BranchTarget).
                     The ALU drives the data EBR's address and write data here,
                     and ``x_value`` is what D forwards from
     M: Memory       the data EBR has latched the X-stage address, so a load's
@@ -18,17 +18,42 @@ The pipeline is F/D/X/M/W, Harvard, word addressed::
                     follows the load one instruction behind
     W: Writeback    single write port into the RegFile, retire pulse
 
-Timing, counting edges from the one that makes a PC current: the FD register
-adds the second edge to the EBR's one, so an instruction is decoded two edges
-after its PC became the fetch address.  A taken branch or a jump therefore has
-two younger slots in flight when it resolves in D -- the word sitting on the
-instruction EBR's output (the fall-through the FD register was about to
-capture) and the word the EBR latches from the old PC on that same edge.  Both
-are squashed: the FD register is forced empty for two consecutive edges while
-the redirect moves the PC, and fetching resumes with the target's word.
-Nothing killed is ever latched into X as valid, so a stale instruction can
-never retire and can never write memory (only an instruction in X writes the
-data EBR).
+Timing (M9a), counting edges from the one that makes a PC current: the FD
+register adds the second edge to the EBR's one, so an instruction is decoded two
+edges after its PC became the fetch address.  The control transfer is resolved
+in X, from the operand registers D already filled (``dx_a``/``dx_rs2`` for the
+compare, ``dx_pc``/``dx_imm``/``dx_a`` for the target, ``dx_link`` for
+JAL/JALR): ``take_x`` is registered into a one-cycle control register and the
+redirect is applied from that register on the following cycle, while the
+transfer sits in M.  Two loops the M5-M8 metrics measured as the critical path
+are gone with it -- compare -> redirect -> PC mux -> FD capture mux (step 1) and
+X-stage result -> forward select -> compare (step 2, which is why the compare
+moved out of D rather than the operand select moving into a register: a
+registered operand select cannot serve a distance-1 dependency, and those cost
+zero bubbles by contract).  The price is four killed slots per taken transfer
+instead of two, so a taken branch or jump fetches its target two cycles later
+than the M7/M8 core did.
+
+The four slots a taken transfer ``P`` kills, and which mechanism kills each:
+
+* ``P+1``, the word the FD register captures on the edge the transfer enters X.
+  That capture is *allowed* (making it conditional would put the compare back on
+  the FD register's enable) and the slot is stopped at the D -> X boundary
+  instead: ``dx_valid`` is ``d_valid & ~stall & ~take_x``, so it never reaches X
+  and can neither write memory, retire, stall, nor -- being invisible to D --
+  halt;
+* ``P+2``, captured into D one edge later, which is the edge ``ct_valid``
+  appears on: ``d_valid = fd_valid & ~squash`` kills it in D;
+* ``P+3`` and ``P+4``, the two words the EBR latches from the old PC while the
+  redirect moves it: ``squash = ct_valid | sq1`` empties the FD register for
+  both capture edges.  ``sq1`` is one cycle behind ``ct_valid``.
+
+Fetching resumes with the target's word, which the FD register captures on the
+edge after that.  Nothing killed is ever latched into X as valid, so a stale
+instruction can never retire and can never write memory (only an instruction in
+X writes the data EBR).  Nothing can register a redirect from a stalled or
+squashed cycle either: ``take_x`` requires ``dx_valid``, a stalled instruction
+never enters X, and reset clears the register.
 
 Memory (M6, ``docs/ISA.md`` sections 1, 5 and 6): ``DataMemory`` is a
 1024 x 18 EBR with a one-cycle synchronous read.  The data EBR is addressed
@@ -70,7 +95,12 @@ forwarded or stalled for on their behalf like any other.
 Control: HALT (``SYSTEM`` with ``imm6 == SYS_HALT``) is decoded in D, freezes
 ``Fetch`` there and squashes everything younger; the HALT itself still flows
 down the pipe, retires through W exactly like golden counts it, and sets
-``o_halt`` sticky.  Nothing retires after it.
+``o_halt`` sticky.  Nothing retires after it.  A HALT younger than a control
+transfer in X -- i.e. one that decodes on the very edge ``take_x`` resolves --
+is killed by it (``d_halt`` is qualified with ``~take_x``), so it cannot freeze
+the fetch of the slot the redirect is about to fill, and a redirect registered
+from a stalled or squashed cycle can never exist at all, so none can fire after
+the freeze starts.
 
 MUL is a single-cycle combinational 18x18 multiply masked to 18 bits, written
 inline so yosys maps it to one DSP without adding a module boundary (M8
@@ -159,7 +189,7 @@ class Core(Elaboratable):
         # Fetch control is combinational (`fetch.i_*` below).  A redirected
         # fetch needs no special case inside Fetch: the PC moves on the edge
         # and the EBR presents the target's word one edge later, which is what
-        # the two-edge squash window in D accounts for.
+        # the four-slot squash window (d_valid, ~take_x, ct_valid, sq1) covers.
         fetch_alive = Signal()
         m.d.sync += fetch_alive.eq(1)      # 0 only in the post-reset cycle
 
@@ -186,10 +216,39 @@ class Core(Elaboratable):
         dx_halt = Signal()
         dx_mem_read = Signal()
         dx_mem_write = Signal()
+        #: Control-transfer fields carried into X (M9a step 2): the compare and
+        #: the target are resolved there, from these registers, so neither the
+        #: X-stage forward path nor the ALU/DSP output reaches the decoder's
+        #: compare or the fetch mux in the same cycle.
+        dx_branch = Signal()
+        dx_cond = Signal(2)
+        dx_jump_reg = Signal()
 
         #: X-stage result (ALU/MUL/link/LUI), driven combinationally below and
         #: forwarded into D one instruction ahead of its writeback.
         x_value = Signal(isa.WIDTH)
+
+        # ---- control-transfer register (M9a) -------------------------------
+        # The decision, not the compare, drives the fetch: the control transfer
+        # resolves in X (step 2) and the redirect is applied from this register
+        # one cycle later, while it sits in M.  Only the target is needed: the
+        # pc of the entry would be dead in the datapath, so it is not stored.
+        ct_valid = Signal()
+        ct_target = Signal(PC_WIDTH)
+
+        #: Registered squash window: ``ct_valid`` and the edge behind it, i.e.
+        #: the two FD-capture edges that must be emptied while the redirect
+        #: moves the PC.  Both are registers, so the FD capture mux never sees
+        #: the compare.
+        sq1 = Signal(1)
+        squash = Signal()
+        m.d.comb += squash.eq(ct_valid | sq1)
+
+        #: D-stage validity: the slot a registered control transfer has already
+        #: killed must be suppressed in D rather than at the capture mux, which
+        #: would put the compare back on the FD register's enable.
+        d_valid = Signal()
+        m.d.comb += d_valid.eq(fd_valid & ~squash)
 
         # ---- operands: RegFile read, X and M forwarding ---------------------
         # Three producers can still be in flight in front of D:
@@ -209,8 +268,8 @@ class Core(Elaboratable):
         d_need1 = Signal()
         d_need2 = Signal()
         m.d.comb += [
-            d_need1.eq(fd_valid & o.rs1_used & (o.rs1 != 0)),
-            d_need2.eq(fd_valid & o.rs2_used & (o.rs2 != 0)),
+            d_need1.eq(d_valid & o.rs1_used & (o.rs1 != 0)),
+            d_need2.eq(d_valid & o.rs2_used & (o.rs2 != 0)),
         ]
 
         xm_valid = Signal()
@@ -264,17 +323,42 @@ class Core(Elaboratable):
             regfile.i_rs1.eq(o.rs1),
             regfile.i_rs2.eq(o.rs2),
         ]
+        # Branch compare and target: driven from the X-stage registers (M9a
+        # step 2).  ``dx_a`` is rs1, ``dx_rs2`` is rs2 (``dx_b`` is the ALU's B
+        # operand, which may be the immediate), ``dx_imm``/``dx_pc`` the target
+        # operands, and ``dx_link`` marks a JAL/JALR (it is also the link mux
+        # select, so no separate jump register is needed).
         m.d.comb += [
-            branch.i_a.eq(d_rs1),
-            branch.i_b.eq(d_rs2),
-            branch.i_cond.eq(o.branch_cond),
+            branch.i_a.eq(dx_a),
+            branch.i_b.eq(dx_rs2),
+            branch.i_cond.eq(dx_cond),
         ]
         m.d.comb += [
-            target.i_pc.eq(fd_pc),
-            target.i_imm.eq(o.imm),
-            target.i_rs1.eq(d_rs1),
-            target.i_jump_reg.eq(o.jump_reg),
+            target.i_pc.eq(dx_pc),
+            target.i_imm.eq(dx_imm),
+            target.i_rs1.eq(dx_a),
+            target.i_jump_reg.eq(dx_jump_reg),
         ]
+
+        # ---- control transfer: resolved in X (M9a step 2) -------------------
+        # The branch compare and the target adder run on the *X-stage* operand
+        # registers.  They used to sit in D behind the operand-select mux, which
+        # put "X-stage result -> forward select -> compare -> redirect -> PC mux
+        # -> FD capture" on one path (~20.5 ns at M7, ~17.5 ns with only the
+        # redirect registered).  Resolving one stage later costs one more killed
+        # slot per taken transfer and takes the whole forward mux and the DSP
+        # out of the control path: what is left is register -> 18-bit compare
+        # -> register.
+        #
+        # ``take_x`` is combinational: it reaches the control register's input,
+        # the D -> X validity and the HALT kill only.  Its one combinational
+        # path into F is ``d_halt -> freeze -> fetch.i_hold`` (a single LUT into
+        # an enable); the redirect, the target and the FD capture muxes are all
+        # registered, which is what removed the ~48 MHz loop.
+        take_x = Signal()
+        m.d.comb += take_x.eq(
+            dx_valid & ((dx_branch & branch.o_taken) | dx_link)
+        )
 
         # LD writes rd (reg_write = 1, mem_read = 1); ST writes no register.
         d_we = Signal()
@@ -284,7 +368,7 @@ class Core(Elaboratable):
         m.d.comb += d_lui.eq(o.op == isa.OP_LUI)
 
         d_halt = Signal()
-        m.d.comb += d_halt.eq(fd_valid & o.halt)
+        m.d.comb += d_halt.eq(d_valid & o.halt & ~take_x)
 
         # ALU operand B: the 4-bit shift amount for the SHIFT group, the
         # immediate when the decoder asks for it (LD/ST included: their
@@ -307,34 +391,29 @@ class Core(Elaboratable):
             & ((d_need1 & (o.rs1 == dx_rd)) | (d_need2 & (o.rs2 == dx_rd)))
         )
 
-        # ---- control transfer ---------------------------------------------
-        # A branch resolves here; JAL/JALR always redirect.  A stalled D
-        # instruction must not redirect yet: its operands are not final.
-        redirect = Signal()
-        m.d.comb += redirect.eq(
-            fd_valid & ~stall & ((o.branch & branch.o_taken) | o.jump)
-        )
-
+        # ---- control-transfer register: the redirect the fetch follows ------
         # Sticky freeze once HALT is in D; o_halt itself follows the retire.
+        # A HALT younger than a control transfer in X is killed by it, so it
+        # must not freeze the fetch: ``take_x`` suppresses the freeze
+        # (``d_halt``), and a redirect registered from a stalled or squashed
+        # cycle can never exist (``take_x`` requires ``dx_valid``, and a
+        # stalled instruction never enters X).
         halt_q = Signal()
         freeze = Signal()
         m.d.comb += freeze.eq(d_halt | halt_q)
         with m.If(freeze):
             m.d.sync += halt_q.eq(1)
 
-        # Two-edge squash window: the edge that would capture the fall-through
-        # and the one that would capture the word latched from the old PC.
-        sq = Signal(1)
-        with m.If(redirect):
-            m.d.sync += sq.eq(1)
-        with m.Elif(sq):
-            m.d.sync += sq.eq(0)
+        # The one-cycle control register: written in X, read in M.
+        m.d.sync += [
+            ct_valid.eq(take_x),
+            ct_target.eq(target.o_target),
+            sq1.eq(ct_valid),
+        ]
 
-        squash = Signal()
-        m.d.comb += squash.eq(redirect | sq)
         m.d.comb += [
-            fetch.i_redirect.eq(redirect),
-            fetch.i_target.eq(target.o_target),
+            fetch.i_redirect.eq(ct_valid),
+            fetch.i_target.eq(ct_target),
             fetch.i_hold.eq(stall | freeze),
             self.o_pc.eq(fetch.o_pc),
         ]
@@ -361,10 +440,19 @@ class Core(Elaboratable):
             ]
 
         # ------------------------------------------------------------- X ---
+        # Every validity that leaves D is qualified by `d_valid`: the slot a
+        # registered redirect killed must not reach X as valid, and its
+        # halt/write bits must not leak into the retire path either.  `~take_x`
+        # is the last kill: the word that was captured into D on the very edge
+        # the resolving control transfer entered X (the transfer's own fall-
+        # through) has no registered squash behind it yet, so it is stopped
+        # here, at the D -> X boundary, instead.
+        d_issue = Signal()
+        m.d.comb += d_issue.eq(d_valid & ~stall & ~take_x)
         m.d.sync += [
-            dx_valid.eq(fd_valid & ~stall),
+            dx_valid.eq(d_issue),
             dx_pc.eq(fd_pc),
-            dx_we.eq(d_we & ~stall),
+            dx_we.eq(d_issue & d_we),
             dx_rd.eq(o.rd),
             dx_a.eq(d_rs1),
             dx_b.eq(d_b),
@@ -374,9 +462,12 @@ class Core(Elaboratable):
             dx_mul.eq(o.mul),
             dx_lui.eq(d_lui),
             dx_link.eq(o.jump),
-            dx_halt.eq(o.halt & ~stall),
-            dx_mem_read.eq(o.mem_read),
-            dx_mem_write.eq(o.mem_write),
+            dx_branch.eq(o.branch),
+            dx_cond.eq(o.branch_cond),
+            dx_jump_reg.eq(o.jump_reg),
+            dx_halt.eq(d_issue & o.halt),
+            dx_mem_read.eq(d_issue & o.mem_read),
+            dx_mem_write.eq(d_issue & o.mem_write),
         ]
 
         m.d.comb += [

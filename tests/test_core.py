@@ -1287,8 +1287,10 @@ def test_a_branch_takes_the_direction_of_the_forwarded_alu_result():
     assert {6, 7, 9} <= set(pcs), pcs
     got = {rd: value for _, rd, value in run.writes()}
     assert got[3] == 0x3FFFD and got[7] == 7
-    # Exactly the two squash slots of the one taken branch, no dependency stall.
-    assert run.cycles == len(run.retires) + 2, run.cycles
+    # Exactly the four killed slots of the one taken branch (M9a: the transfer
+    # resolves in X and the redirect is registered, so the target is fetched two
+    # cycles later than the M7/M8 core did), no dependency stall.
+    assert run.cycles == len(run.retires) + 4, run.cycles
 
 
 def test_a_store_commits_the_word_forwarded_from_the_alu():
@@ -1339,8 +1341,9 @@ def test_a_jalr_jumps_through_the_forwarded_alu_base():
     assert 7 in pcs, pcs
     got = {rd: value for _, rd, value in run.writes()}
     assert got[4] == 4 and got[7] == 7      # link value and target both right
-    # Exactly the two squash slots of the jump, no dependency stall.
-    assert run.cycles == len(run.retires) + 2, run.cycles
+    # Exactly the four killed slots of the jump (M9a: X-stage resolve plus a
+    # registered redirect), no dependency stall.
+    assert run.cycles == len(run.retires) + 4, run.cycles
 
 
 def test_a_jal_link_value_is_consumed_without_a_dependency_bubble():
@@ -1373,6 +1376,211 @@ def test_a_jal_link_value_is_consumed_without_a_dependency_bubble():
     assert chained_run.cycles == free_run.cycles, (
         chained_run.cycles, free_run.cycles)
     assert machine.trace == chained_run.writes()
+
+
+# --- M9a: the registered control transfer and its killed slots ---------------
+
+#: Words the taken branch at word 1 (``pc + 1 + 4 == 6``) kills: the fall-through
+#: captured into D on the resolve edge, the word killed in D, and the two the
+#: registered squash window empties.
+BRANCH_SLOTS = (2, 3, 4, 5)
+BRANCH_TARGET = 6
+BRANCH_IMM = BRANCH_TARGET - 2
+
+
+def _branch_with_slot(slot, word, tail=()):
+    """Branch at 1 taken to word 6, with ``word`` planted in one killed slot.
+
+    The four slots are killed by four different mechanisms, which is why each
+    one gets its own store/HALT/JAL/branch test: slot 2 is captured into D on
+    the edge the control transfer resolves and is stopped at the D -> X
+    boundary, slot 3 is captured into D one edge later and killed there, and
+    slots 4 and 5 are the two FD-capture edges the registered squash window
+    empties while the redirect moves the PC.  Everything after word 6 is
+    ``tail``.
+    """
+    program = [addi(1, 0, 1), br(isa.OP_BEQ, 1, 1, BRANCH_IMM),
+               nop(), nop(), nop(), nop(), addi(2, 0, 2)]
+    program[slot] = word
+    return program + list(tail)
+
+
+def test_a_halt_in_each_newly_squashed_slot_is_killed():
+    """HALT in any killed slot must not freeze the fetch or retire."""
+    for slot in BRANCH_SLOTS:
+        program = _branch_with_slot(slot, halt(), [halt()])
+        machine, run = assert_lockstep(program)
+        pcs = [pc for _, pc, _, _, _ in run.retires]
+        assert pcs == [0, 1, BRANCH_TARGET, 7], (slot, pcs)
+        assert run.halted
+        assert machine.retired == 4
+
+
+def test_a_store_in_each_newly_squashed_slot_never_commits():
+    """A store in a killed slot must not reach the data EBR (no X validity)."""
+    image = data_image()
+    for slot, addr in zip(BRANCH_SLOTS, (0x11, 0x12, 0x13, 0x14)):
+        program = _branch_with_slot(slot, st(1, 0, addr), [ld(3, 0, addr),
+                                                           halt()])
+        machine, run = assert_lockstep(program, data=image)
+        assert machine.mem[addr] == image[addr], (slot, hex(machine.mem[addr]))
+        got = {rd: value for _, rd, value in run.writes()}
+        assert got[3] == image[addr], slot
+
+
+def test_a_jal_in_each_newly_squashed_slot_does_not_link_or_redirect():
+    """A JAL in a killed slot must neither write its link register nor jump."""
+    for slot in BRANCH_SLOTS:
+        # Point the stale JAL at word 8: firing it would skip words 6 and 7.
+        program = _branch_with_slot(slot, jal(5, 7 - slot),
+                                    [addi(3, 0, 3), halt()])
+        machine, run = assert_lockstep(program)
+        pcs = [pc for _, pc, _, _, _ in run.retires]
+        assert pcs == [0, 1, 6, 7, 8], (slot, pcs)
+        assert 5 not in {rd for _, rd, _ in run.writes()}, slot
+
+
+def test_a_branch_in_each_newly_squashed_slot_does_not_redirect():
+    """A taken branch in a killed slot must not move the PC a second time."""
+    for slot in BRANCH_SLOTS:
+        # Same shape: a stale redirect to word 8 would skip words 6 and 7.
+        program = _branch_with_slot(slot, br(isa.OP_BNE, 1, 0, 7 - slot),
+                                    [addi(3, 0, 3), halt()])
+        machine, run = assert_lockstep(program)
+        pcs = [pc for _, pc, _, _, _ in run.retires]
+        assert pcs == [0, 1, 6, 7, 8], (slot, pcs)
+
+
+def test_a_taken_branch_immediately_after_a_taken_branch_fires_once():
+    """The slot-1 word of a taken branch is a branch itself: one redirect only."""
+    program = [
+        addi(1, 0, 1),                 # 0
+        br(isa.OP_BEQ, 1, 1, 5),       # 1: taken -> 7
+        br(isa.OP_BNE, 1, 0, 5),       # 2: slot 1, taken if it were decoded
+        nop(), nop(), nop(), nop(),    # 3..6: its remaining slots
+        br(isa.OP_BEQ, 1, 1, 4),       # 7: taken -> 12, the second real one
+        nop(), nop(), nop(), nop(),    # 8..11: its four slots
+        addi(4, 0, 4),                 # 12
+        halt(),                        # 13
+    ]
+    machine, run = assert_lockstep(program)
+    pcs = [pc for _, pc, _, _, _ in run.retires]
+    assert pcs == [0, 1, 7, 12, 13], pcs
+    assert len(run.retires) == machine.retired == 5
+    # Two taken branches, four killed slots each: 5 retires + 2 x 4 cycles.
+    assert run.cycles == len(run.retires) + 8, run.cycles
+
+
+def test_a_halt_in_flight_with_the_control_register_cannot_redirect():
+    """The slot-1 HALT decodes on the edge the branch resolves in X.
+
+    Its freeze must not take effect (it is killed by ``take_x``), the redirect
+    must still land exactly once, and the PC ends frozen on the halt's own pc
+    with no second jump after it.
+    """
+    program = [addi(1, 0, 1), br(isa.OP_BEQ, 1, 1, BRANCH_IMM), halt(),
+               nop(), nop(), nop(), addi(2, 0, 2), halt()]
+    run = run_core(program, post_cycles=16)
+    assert run.halted
+    assert [pc for _, pc, _, _, _ in run.retires] == [0, 1, 6, 7]
+    # HALT retires with we=0 and nothing retires after it.
+    assert run.retires[-1][2] == 0 and len(run.retires) == 4
+    assert all(retire == 0 for retire, _, _ in run.post)
+    # o_halt sticks and the PC is frozen: no stale redirect moved it later.
+    assert all(flag == 1 for _, _, flag in run.post)
+    assert len({pc for _, pc, _ in run.post}) == 1
+
+
+def test_a_redirect_is_not_registered_from_a_stalled_cycle():
+    """A branch held by the load-use interlock resolves once, with final data.
+
+    The loaded word is 5 and r1 is 0, so a redirect taken from the stalled
+    cycle (stale r2 == 0) would branch the wrong way and skip word 4.  A
+    stalled instruction never enters X, so ``take_x`` cannot fire for it.
+    """
+    image = data_image()
+    image[0] = 5
+    program = [
+        addi(1, 0, 0),                 # 0: base 0
+        ld(2, 1, 0),                   # 1: r2 = mem[0] = 5
+        br(isa.OP_BEQ, 2, 1, 2),       # 2: stalled one cycle, then not taken
+        addi(3, 0, 3),                 # 3: executes either way
+        addi(4, 0, 4),                 # 4: only reached when not taken
+        halt(),                        # 5
+    ]
+    machine, run = assert_lockstep(program, data=image)
+    pcs = [pc for _, pc, _, _, _ in run.retires]
+    assert pcs == [0, 1, 2, 3, 4, 5], pcs
+    # One load-use bubble, no redirect: every instruction retires once.
+    assert run.cycles == len(program) + 1, run.cycles
+
+
+def test_mid_run_reset_with_a_pending_redirect_replays_cleanly():
+    """A reset on the cycle the control register is live clears it.
+
+    Calibrated from an undisturbed run: the PC takes the branch target one
+    cycle after the control register becomes valid, so the reset is applied on
+    that cycle.  After it the replay must start from word 0 again -- a
+    surviving register entry would send the PC straight back to the target.
+    """
+    program = [addi(1, 0, 1), br(isa.OP_BEQ, 1, 1, BRANCH_IMM), nop(), nop(),
+               nop(), nop(), addi(2, 0, 2), halt()]
+
+    def run(reset_cycle=None, cycles=40):
+        core = Core(program)
+        seen = {}
+        sim = Simulator(core)
+        sim.add_clock(CLK_PERIOD, domain="sync")
+
+        async def tb(ctx):
+            rows, pcs, retires = [], [], []
+            ctx.set(core.i_rst, 1)
+            await ctx.tick()
+            await ctx.delay(SETTLE)
+            ctx.set(core.i_rst, 0)
+            for cycle in range(1, cycles + 1):
+                if cycle == reset_cycle:
+                    ctx.set(core.i_rst, 1)
+                    await ctx.tick()
+                    await ctx.delay(SETTLE)
+                    pcs.append(("rst", ctx.get(core.o_pc)))
+                    assert ctx.get(core.o_retire) == 0
+                    ctx.set(core.i_rst, 0)
+                    continue
+                await ctx.tick()
+                await ctx.delay(SETTLE)
+                pcs.append((cycle, ctx.get(core.o_pc)))
+                if ctx.get(core.o_retire):
+                    retires.append((cycle, ctx.get(core.o_retire_pc),
+                                    ctx.get(core.o_retire_we),
+                                    ctx.get(core.o_retire_rd),
+                                    ctx.get(core.o_retire_value)))
+            seen["pcs"] = pcs
+            seen["retires"] = retires
+
+        sim.add_testbench(tb)
+        sim.run()
+        return seen
+
+    clean = run()
+    first_target = next(cycle for cycle, pc in clean["pcs"]
+                        if pc == BRANCH_TARGET)
+    pending = first_target - 1          # the cycle the register entry is live
+    assert clean["pcs"][pending - 1][1] == BRANCH_TARGET - 1, clean["pcs"][:8]
+
+    replayed = run(reset_cycle=pending)
+    reset_at = [i for i, (cycle, _) in enumerate(replayed["pcs"])
+                if cycle == "rst"][0]
+    # The PC sequence after the reset is the clean run's, from its first cycle:
+    # a stale redirect would replace the leading 1,2,3,4 with the target.
+    after = [pc for _, pc in replayed["pcs"][reset_at + 1:]]
+    clean_pcs = [pc for _, pc in clean["pcs"]]
+    n = min(len(after), len(clean_pcs))
+    assert n >= 20
+    assert after[:n] == clean_pcs[:n], after[:8]
+    # Same retire trace, same count, nothing retired during the reset cycle.
+    assert [(pc, we, rd, v) for _, pc, we, rd, v in replayed["retires"]] == \
+        [(pc, we, rd, v) for _, pc, we, rd, v in clean["retires"]]
 
 
 def test_a_load_use_still_costs_exactly_one_bubble():
