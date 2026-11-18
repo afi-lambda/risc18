@@ -11,6 +11,6 @@ constraint: 25.0 MHz
 | DP16KD | 2 | 56 |
 | MULT18X18D | 1 | 28 |
 
-* fmax `$glbnet$boot_clk`: 73.45 MHz (constraint 600.24 MHz, missed) -- nextpnr's own derived constraint for the PLL-generated clock (it applies CLKFB_DIV without CLKOP_DIV), not the 25.0 MHz the design is constrained at
+* fmax `$glbnet$boot_clk`: 73.45 MHz (missed against nextpnr's PLL-derived constraint) -- historical row: this build is of the M10-era FullTop RTL and cannot be re-rendered at this head, and the constraint nextpnr derived for it came from the PLL divider set that stage 4 replaced (see `docs/RESULTS.md`, "What nextpnr does with the PLL-generated clock"). The fmax number is the post-route delay; the verdict is not a verdict about this design.
 
 * critical path: logic 5.8 ns, routing 7.8 ns

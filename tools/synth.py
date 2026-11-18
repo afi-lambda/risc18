@@ -193,15 +193,20 @@ def main():
             lines.append(f"| {name} | {u['used']} | {u['total']} |")
         lines.append("")
     if report.get("fmax"):
+        pll = getattr(top, "pll", None)
+        pll_out = getattr(pll, "f_out_mhz", None)
         for f in report["fmax"]:
             line = (f"* fmax `{f['clock']}`: {f['fmax_mhz']} MHz "
                     f"(constraint {f['constraint_mhz']} MHz, "
                     f"{'met' if f['met'] else 'missed'})")
             if abs(f["constraint_mhz"] - args.freq) > 1.0:
-                line += (" -- nextpnr's own derived constraint for the "
-                         "PLL-generated clock (it applies CLKFB_DIV without "
-                         "CLKOP_DIV), not the "
-                         f"{args.freq:.1f} MHz the design is constrained at")
+                # A PLL-generated net gets nextpnr's own derived constraint,
+                # not --freq (which only feeds the LPF for the pad).
+                line += (" -- nextpnr's derived constraint for the "
+                         "PLL-generated clock (computed from the PLL "
+                         "parameters, not from --freq)")
+                if pll_out is not None:
+                    line += f"; the PLL's CLKOP is {pll_out:.3f} MHz"
             lines.append(line)
         lines.append("")
     if report.get("critical") and report["critical"]["logic_ns"] is not None:
