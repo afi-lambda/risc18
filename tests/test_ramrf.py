@@ -389,7 +389,9 @@ def test_clear_walk_latency_matches_the_documented_count():
     sim.add_testbench(tb)
     sim.run()
 
-    r15_zero = next(c for c, a, b in samples if a == 0)
-    r14_zero = next(c for c, a, b in samples if b == 0)
+    r15_zero = next((c for c, a, b in samples if a == 0), None)
+    r14_zero = next((c for c, a, b in samples if b == 0), None)
+    assert r15_zero is not None, f"r15 never read zero: {samples}"
+    assert r14_zero is not None, f"r14 never read zero: {samples}"
     assert (r14_zero, r15_zero) == (16, 17), samples[:20]
     assert samples[-1][1] == 0 and samples[-1][2] == 0, samples[-1]

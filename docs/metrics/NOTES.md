@@ -374,6 +374,13 @@ with the flop file's mux tree in front of it, that hop was hidden.
    `test_clear_walk_latency_matches_the_documented_count`, which pins the count.  While the walk runs the write port belongs to it, so a
    software write in that window is dropped.
 
+The M9 and M10 full-top metric files (`m9_full.md`, `m10_full.md`) predate the
+generator change that annotates nextpnr's derived constraint, so their fmax lines
+still read "missed 600.24 MHz" -- that is nextpnr 0.7-1 deriving
+`f_in * CLKFB_DIV / CLKI_DIV` for the PLL output (see the M9b note above), not a
+missed target.  `m9_full.md` cannot be re-rendered at this head because its RTL
+is M9's; `m10_full.md` reproduces exactly.
+
 The flop file stays the default (fmax first, and it keeps the frozen reset
 guarantee). `docs/metrics/m11_core_ram.md`, `m11_full_ram.md` and
 `m11_core_flop.md` are the seed-1 runs.

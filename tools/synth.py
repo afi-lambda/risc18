@@ -198,8 +198,10 @@ def main():
                     f"(constraint {f['constraint_mhz']} MHz, "
                     f"{'met' if f['met'] else 'missed'})")
             if abs(f["constraint_mhz"] - args.freq) > 1.0:
-                line += (" -- nextpnr-derived constraint for a divided clock, "
-                         f"not the {args.freq:.1f} MHz the design is constrained at")
+                line += (" -- nextpnr's own derived constraint for the "
+                         "PLL-generated clock (it applies CLKFB_DIV without "
+                         "CLKOP_DIV), not the "
+                         f"{args.freq:.1f} MHz the design is constrained at")
             lines.append(line)
         lines.append("")
     if report.get("critical") and report["critical"]["logic_ns"] is not None:
