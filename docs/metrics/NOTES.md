@@ -328,13 +328,18 @@ so the masks cost 186 LUT4, 8 FF and 1.9 MHz.
 
 Note the mapping sensitivity this exercise exposed: two *functionally dead*
 address registers (`rs1_q`/`rs2_q`, written and never read) are kept in
-`ramrf.py` on purpose, because deleting them perturbs the ABC/nextpnr mapping
-and costs +144 LUT4 / -1 MHz (1327 LUT4 / 72.45 MHz at seed 1 without them).
-Same class of effect as the M8 multiplier's submodule boundary.  The 4-LUT
-difference between the mask build here (1369) and the pre-review tree (1373) is
-likewise a netlist difference from the single-driver `clear` rewrite, not
-placement -- LUT/FF counts are seed-invariant here (1327 or 1183 on every seed);
-only fmax moves with placement.
+`ramrf.py` on purpose.  yosys deletes them (407 FF either way), but their
+presence in the RTL steers the ABC/nextpnr mapping: without them the core top
+costs **+144 LUT4 on every seed** (1327 vs 1183), a seed-invariant yosys result,
+while the fmax difference is inside the seed spread (means 70.52 vs 72.61,
+worsts 68.84 vs 68.24 over seeds 1/2/3/7 -- so quote the sweep, not seed 1).
+Same class of effect as the M8 multiplier's submodule boundary, and a toolchain
+artefact: re-measure after a yosys/ABC upgrade.
+
+The 4-LUT difference between the mask build (1369) and the pre-review tree
+(1373) is an ABC statement-order artefact, not logic: the two builds emit
+identical connectivity, and `Core` elaborates `RegFileRam(clear=False)`, so no
+clear logic exists in any committed netlist.
 
 **Critical path.** The claim to make precisely: the flop file's *read-mux and
 write-through* path is gone, and on the RAM builds the worst path is now
@@ -362,11 +367,12 @@ with the flop file's mux tree in front of it, that hop was hidden.
    and the contents come from the bitstream initialisation, so a mid-run reset
    leaves the registers as they were.  `RegFileRam(clear=True)` adds a 16-cycle
    zeroing walk of the write port (single-driver, tested).  The walk runs *after*
-   deassertion, so one cycle of reset suffices; the array reads zero from the
-   17th cycle after the edge (a 16-cycle walk plus the one-cycle read latency --
-   the register written in the walk's last cycle is the last to show).  While the
-   walk runs the write port belongs to it, so a software write in that window is
-   dropped.
+   deassertion, so one cycle of reset suffices.  Counting from the first rising
+   edge after that deasserting edge, the last-written register reads zero one
+   cycle after the others (its write shares an edge with the read that exposes
+   it, read-first): cycles 16 and 17 for r14 and r15 in
+   `test_clear_walk_latency_matches_the_documented_count`, which pins the count.  While the walk runs the write port belongs to it, so a
+   software write in that window is dropped.
 
 The flop file stays the default (fmax first, and it keeps the frozen reset
 guarantee). `docs/metrics/m11_core_ram.md`, `m11_full_ram.md` and

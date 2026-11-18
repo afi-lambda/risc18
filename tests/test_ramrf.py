@@ -346,3 +346,50 @@ def test_seeded_random_programs_lockstep_with_golden():
                                   rng.randrange(0, 12)))
         program.append(halt())
         _check(program)
+
+def test_clear_walk_latency_matches_the_documented_count():
+    """Pin the documented count: r14 reads zero on cycle 16, r15 on 17.
+
+    The convention is explicit, because an off-by-one here is exactly what this
+    test exists to stop: cycle 1 is the first rising edge after the deasserting
+    reset edge, and the value sampled on cycle *k* is the data the read issued on
+    cycle *k - 1* produced.  The 16-cycle walk then leaves r14 (written one step
+    before the end) reading zero on cycle 16 and r15 on cycle 17 -- one cycle
+    later because r15's write shares an edge with the read that would expose it
+    (read-first).  Both numbers appear in ramrf.py and docs/metrics/NOTES.md.
+    """
+    harness = RamHarness(clear=True)
+    sim = Simulator(harness)
+    sim.add_clock(CLK_PERIOD, domain="sync")
+    samples = []
+
+    async def tb(ctx):
+        ctx.set(harness.i_rst, 1)
+        await ctx.tick()
+        ctx.set(harness.i_rst, 0)
+        for _ in range(20):          # let the power-on walk finish
+            await ctx.tick()
+        for reg in (14, 15):         # dirty the two registers the walk ends on
+            ctx.set(harness.i_we, 1)
+            ctx.set(harness.i_rd, reg)
+            ctx.set(harness.i_wdata, 0x100 + reg)
+            await ctx.tick()
+        ctx.set(harness.i_we, 0)
+        ctx.set(harness.i_rst, 1)
+        await ctx.tick()             # exactly one reset cycle
+        ctx.set(harness.i_rst, 0)
+        ctx.set(harness.i_rs1, 15)
+        ctx.set(harness.i_rs2, 14)
+        for cycle in range(1, 25):
+            await ctx.tick()         # after this edge we are in cycle `cycle`
+            await ctx.delay(SETTLE)
+            samples.append((cycle, ctx.get(harness.o_rs1),
+                            ctx.get(harness.o_rs2)))
+
+    sim.add_testbench(tb)
+    sim.run()
+
+    r15_zero = next(c for c, a, b in samples if a == 0)
+    r14_zero = next(c for c, a, b in samples if b == 0)
+    assert (r14_zero, r15_zero) == (16, 17), samples[:20]
+    assert samples[-1][1] == 0 and samples[-1][2] == 0, samples[-1]

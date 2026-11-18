@@ -24,9 +24,12 @@ available there since M10) and consumes the data in D.  Two consequences:
   reset and the RAM contents come from the bitstream's initialisation, so a
   mid-run reset leaves the registers as they were.  ``clear=True`` adds a
   16-cycle zeroing walk of the write port that runs *after* the reset is
-  released (one cycle of reset is enough; the registers read zero from the
-  16th cycle after deassertion).  While the walk runs the write port belongs to
-  it, so a software write issued in that window is dropped.
+  released.  One cycle of reset is enough: counting from the first rising edge
+  after the deasserting edge, the walk clears the array and the register written
+  last reads zero one cycle after the others (its write shares an edge with the
+  read that exposes it, read-first) -- cycles 16 and 17 in
+  ``test_clear_walk_latency_matches_the_documented_count``.  While the walk runs the write port belongs to it, so a
+  software write issued in that window is dropped.
 
 Interface
 ---------
@@ -66,12 +69,15 @@ class RegFileRam(Elaboratable):
         rp1 = mem.read_port()
         rp2 = mem.read_port()
 
-        # Functionally dead, kept on purpose: these two address registers change
-        # nothing in the elaborated logic, but removing them perturbs the ABC /
-        # nextpnr mapping enough to cost +144 LUT4 and -1 MHz on the core top
-        # (1327 LUT4 / 72.45 MHz at seed 1 without them, 1183 / 73.48 with them,
-        # both builds otherwise identical).  Same class of effect as the M8
-        # multiplier's submodule boundary; see docs/metrics/NOTES.md (M11).
+        # Functionally dead, kept on purpose.  yosys deletes these registers
+        # (407 FF either way), but their presence in the RTL steers the ABC /
+        # nextpnr mapping: without them the core top costs +144 LUT4 on every
+        # seed (1327 vs 1183 at 60 MHz), a seed-invariant yosys result, while
+        # the fmax difference is inside the seed spread (mean 70.52 vs 72.61,
+        # worst 68.84 vs 68.24 over seeds 1/2/3/7).  Same class of effect as the
+        # M8 multiplier's submodule boundary.  This is a toolchain artefact --
+        # re-measure before relying on it after a yosys/ABC upgrade.
+        # See docs/metrics/NOTES.md (M11).
         rs1_q = Signal(4)
         rs2_q = Signal(4)
         m.d.sync += [rs1_q.eq(self.i_rs1), rs2_q.eq(self.i_rs2)]

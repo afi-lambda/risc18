@@ -194,9 +194,13 @@ def main():
         lines.append("")
     if report.get("fmax"):
         for f in report["fmax"]:
-            lines.append(f"* fmax `{f['clock']}`: {f['fmax_mhz']} MHz "
-                         f"(constraint {f['constraint_mhz']} MHz, "
-                         f"{'met' if f['met'] else 'missed'})")
+            line = (f"* fmax `{f['clock']}`: {f['fmax_mhz']} MHz "
+                    f"(constraint {f['constraint_mhz']} MHz, "
+                    f"{'met' if f['met'] else 'missed'})")
+            if abs(f["constraint_mhz"] - args.freq) > 1.0:
+                line += (" -- nextpnr-derived constraint for a divided clock, "
+                         f"not the {args.freq:.1f} MHz the design is constrained at")
+            lines.append(line)
         lines.append("")
     if report.get("critical") and report["critical"]["logic_ns"] is not None:
         c = report["critical"]
