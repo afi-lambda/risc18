@@ -153,18 +153,24 @@ Two structural steps were needed; the first alone was not enough.
   appears through `dx_a -> MULT18X18D -> x_value select -> operand mux ->
   compare -> take -> control register`; still short of 60 MHz.
 * Step 2 — move the compare and the target adder into X (operands are already
-  forwarded there), keeping the registered redirect: 1813 LUT4, 605 FF,
+  forwarded there), keeping the registered redirect (committed): 1813 LUT4, 605 FF,
   2 DP16KD, 1 DSP, **65.82 / 67.91 / 70.01 / 73.89 MHz** (seeds 1/2/3/7) —
   4/4 met at the 60 MHz constraint, worst seed 15.2 ns against a 16.67 ns
-  budget. Every path is register-to-register with no fetch or I/O path, and the
-  limiting path varies by seed and is never the control transfer: seed 1 is
-  `fd_instr -> decode -> rd` into the regfile write enable (2.4 ns logic +
-  12.8 ns routing), seed 2 `alu_op -> regfile.i_we` (2.9 + 11.8), seed 3
-  `dx_a -> MULT18X18D A` (6.1 + 8.2) and seed 7 `dmem DOA -> writeback LUT`
-  (7.2 + 6.3). No seed's worst path terminates at `ct_target`.
-  (Note the PnR spread: an intermediate head measured 76.40 / 65.81 / 73.36 /
-  74.26 MHz on the same structure — removing one dead 16-bit register moved the
-  seeds by up to 10 MHz in both directions, so quote the sweep, never one run.)
+  budget. Every path is register-to-register with no fetch or I/O path, and in
+  all four seeds the worst path ends by loading a D -> X operand register
+  through the forward/hazard select: seed 1 `i_instr -> rd/decoder -> xm_we
+  cone -> d_rs2 select -> dx_b` (2.4 ns logic + 12.8 ns routing), seed 2
+  `i_instr -> alu_op -> regfile.i_we cone -> d_rs2 -> dx_b` (2.9 + 11.8),
+  seed 3 `dx_a -> MULT18X18D A -> P5 -> o_target adder -> x_value ->
+  d_rs2 -> dx_b` (6.1 + 8.2) and seed 7 `dmem DOA -> LUT -> the o_target
+  carry chain -> d_rs1 -> dx_a` (7.2 + 6.3). So the limiter is the operand
+  select itself; the branch-target adder (`o_target`) sits on two of the four
+  paths but is never their tail, and no path ends at `ct_target`.
+  (PnR spread: an intermediate head measured 76.40 / 65.81 / 73.36 / 74.26 MHz
+  on the same structure. That head differed by the `dx_mem_*` gating change,
+  which is netlist-visible (-16 LUT4); the dead `ct_pc` removal in the same
+  commit is free because yosys already trimmed it — both heads measure 605 FF.
+  Quote the sweep, never one run.)
 * Cost: a taken branch or jump kills four fetch slots instead of two, so CPI
   goes 1.31 -> 1.615 on `CORE_TOP_PROGRAM`, 1.37 -> 1.60 on
   `test_memory_accumulation_loop_matches_golden`'s five-iteration store/load
@@ -175,8 +181,10 @@ Two structural steps were needed; the first alone was not enough.
   revisit if a later design cares more about branch-heavy code than fmax.
 * Residual risk: the tightest seed is 1 at 65.82 MHz, i.e. 5.8 MHz of margin
   (1.45 ns of a 16.67 ns budget, 8.7%), and the spread across seeds is 8.1 MHz.
-  The limiters are decode -> regfile write enable (seeds 1/2), `dx_a` -> DSP
-  input (seed 3) and the data EBR output -> writeback (seed 7).
+  `docs/metrics/m9_core.md` records the seed-1 run (the tool writes `--seed` into
+  the JSON only); the four-seed sweep above is the headline number.
+  Every seed's limiter is the D -> X operand-register load through the
+  forward/hazard select (`dx_b` on seeds 1/2/3, `dx_a` on seed 7).
   Levers, in order: a dedicated distance-1 bypass out of `x_value` (a plain D1/D2
   operand register split would break the zero-bubble distance-1 contract),
   reducing `dx_a`'s fanout into the DSP and the compare, or a full-top (PLL)
