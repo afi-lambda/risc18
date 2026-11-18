@@ -32,12 +32,16 @@ PACKAGE = "CABGA256"
 SPEED = "6"
 
 
-def load_top(spec: str):
+def load_top(spec: str, **top_kwargs):
     mod_name, _, attr = spec.partition(":")
     if not attr:
         raise SystemExit(f"--top must be module:attr, got {spec!r}")
     mod = importlib.import_module(mod_name)
-    top = getattr(mod, attr)()
+    cls = getattr(mod, attr)
+    try:
+        top = cls(**top_kwargs)
+    except TypeError as exc:
+        raise SystemExit(f"{spec} does not accept {sorted(top_kwargs)}: {exc}")
     ports = getattr(top, "ports", None)
     if ports is None:
         raise SystemExit(f"{spec} has no .ports attribute")
@@ -124,6 +128,9 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--no-pnr", action="store_true",
                     help="stop after yosys (unit tops without a clock)")
+    ap.add_argument("--ram-rf", action="store_true",
+                    help="build the core with the distributed-RAM register file "
+                         "(CoreTop/FullTop only)")
     ap.add_argument("--pnr-arg", action="append", default=[], metavar="ARG",
                     help="extra nextpnr-ecp5 argument, repeatable "
                          "(e.g. --pnr-arg=--placer-heap-timingweight --pnr-arg=50)")
@@ -135,7 +142,7 @@ def main():
     metrics_dir = ROOT / args.out / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
-    top, ports = load_top(args.top)
+    top, ports = load_top(args.top, **({"ram_rf": True} if args.ram_rf else {}))
     v = verilog.convert(top, name="top", ports=ports)
     (out / "top.v").write_text(v)
 
@@ -187,9 +194,15 @@ def main():
         lines.append("")
     if report.get("fmax"):
         for f in report["fmax"]:
-            lines.append(f"* fmax `{f['clock']}`: {f['fmax_mhz']} MHz "
-                         f"(constraint {f['constraint_mhz']} MHz, "
-                         f"{'met' if f['met'] else 'missed'})")
+            line = (f"* fmax `{f['clock']}`: {f['fmax_mhz']} MHz "
+                    f"(constraint {f['constraint_mhz']} MHz, "
+                    f"{'met' if f['met'] else 'missed'})")
+            if abs(f["constraint_mhz"] - args.freq) > 1.0:
+                line += (" -- nextpnr's own derived constraint for the "
+                         "PLL-generated clock (it applies CLKFB_DIV without "
+                         "CLKOP_DIV), not the "
+                         f"{args.freq:.1f} MHz the design is constrained at")
+            lines.append(line)
         lines.append("")
     if report.get("critical") and report["critical"]["logic_ns"] is not None:
         c = report["critical"]

@@ -334,7 +334,13 @@ def test_full_top_wiring_is_exactly_the_documented_one():
     core_ports = dict(re.findall(r"\.([\\\w$]+)\s*\(([^)]*)\)", v[v.index("\\top.core  core ("):
                                                           v.index("\\top.pll  pll (")]))
     # The retire value's port name is mangled by Amaranth, so find it by stem.
-    value_port = next(k for k in core_ports if "wdata" in k)
+    # The writeback port's Verilog name depends on how the register file
+    # consumes it: the write-through mux of the flop file mangles ``i_wdata``
+    # into ``i_wdata$N``, and a build that drives the memory write port directly
+    # can leave it as ``w_value``.  No committed top produces the second form
+    # today; the fallback keeps the pin working for a ``--ram-rf`` FullTop build.
+    value_port = next(k for k in core_ports
+                      if "wdata" in k or k == "w_value")
     for out, port in (("o_pc", "o_pc"), ("o_retire", "w_valid"),
                       ("o_retire_pc", "o_retire_pc"),
                       ("o_retire_we", "o_retire_we"),
@@ -364,3 +370,21 @@ def test_full_top_uses_the_documented_sequencer_constants():
     top = FullTop()
     assert top.boot.hold == PROD_BOOT_HOLD
     assert top.boot.wdog_bits == PROD_WDOG_BITS
+
+
+def test_ram_rf_knob_builds_the_ram_register_file():
+    """``ram_rf=True`` reaches the core through both measurement tops.
+
+    The knob is how the M11 numbers are produced (``tools/synth.py --ram-rf``),
+    so both tops must accept it and the core must actually switch files.
+    """
+    for top_cls in (CoreTop, FullTop):
+        flop = top_cls()
+        ram = top_cls(ram_rf=True)
+        assert flop.core.ram_rf is False
+        assert ram.core.ram_rf is True
+        # Elaborate both, so a mis-wired variant cannot hide behind the default.
+        for top in (flop, ram):
+            from amaranth.hdl import Fragment
+            Fragment.get(top, None).prepare()
+

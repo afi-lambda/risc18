@@ -281,3 +281,106 @@ So the single 5.47 ns hop seen in the M9 FullTop seed-1 path was placement luck,
 not a structural defect, and chasing it per build is not a design improvement:
 the swing (+3.1 / -6.3 MHz) is the same order as the seed spread. The protocol
 stays "four seeds, quote the worst".
+
+## M11: RAM register file (distributed `TRELLIS_DPR16X4`, not EBR)
+
+`Core(ram_rf=True)` (and `tools/synth.py --ram-rf`, `CoreTop(..., ram_rf=True)`,
+`FullTop(..., ram_rf=True)`) builds the register file from a 16 x 18 Amaranth
+``Memory`` (`risc18.ramrf.RegFileRam`) instead of 270 flops plus two 16:1 x 18-bit
+read muxes. yosys maps it to **two replicated banks of five `TRELLIS_DPR16X4`
+distributed-RAM cells** (10 cells, **0 EBR**, no flops for the array): the memory
+has one write and two read ports, so each read port forces a replica with its own
+write port.
+
+It is not an EBR design. One DP16KD would hold 16 x 18 bits in ~1 % of its
+capacity, and a true dual-port EBR has only two ports, so it cannot serve two
+reads plus one write per cycle. At 16 entries the distributed-RAM primitive is
+the one the device offers.
+
+Reproduce (the seed-1 commands write the committed files; for the sweep use a
+seed-suffixed `--name`, e.g. `--name sweep_core_ram_s2 --seed 2`, so it does not
+overwrite the committed seed-1 evidence):
+
+```
+.venv/bin/python tools/synth.py --top risc18.tops:CoreTop --name m11_core_ram \
+    --freq 60 --seed 1 --ram-rf
+.venv/bin/python tools/synth.py --top risc18.tops:FullTop --name m11_full_ram \
+    --freq 25 --seed 1 --ram-rf
+.venv/bin/python tools/synth.py --top risc18.tops:CoreTop --name m11_core_flop \
+    --freq 60 --seed 1
+```
+
+| build (CoreTop, 60 MHz) | LUT4 | FF | DPR16X4 | fmax seeds 1/2/3/7 | mean | worst |
+|---|---|---|---|---|---|---|
+| M10 flop register file (default) | 1640 | 640 | 0 | 71.03 / 75.59 / 72.14 / 73.61 | 73.09 | 71.03 |
+| M11 RAM register file | **1183** | **407** | 10 | 73.48 / 75.27 / 68.24 / 73.44 | 72.61 | 68.24 |
+
+-457 LUT4 (-27.9 %), -233 FF (-36.4 %), 0 EBR either way.  FullTop seed 1 with the
+RAM file: 1272 LUT4 / 437 FF / **67.59 MHz** (flop file: 1620 / 670 / 73.45) -- so
+the chip-level top loses 5.9 MHz even though the core top is roughly neutral.
+
+Two output-side `r0` masks were removed: `r0` cannot be written (the write enable
+discards `i_rd == 0`) and the array initialises to zero, so they were duplicate
+logic that also pushed the RAM output through an extra mux.  Restoring them
+together with the address registers they need, at seed 1, gives
+1369 LUT4 / 415 FF / 71.62 MHz against 1183 / 407 / 73.48 for the shipped file,
+so the masks cost 186 LUT4, 8 FF and 1.9 MHz.
+
+Note the mapping sensitivity this exercise exposed: two *functionally dead*
+address registers (`rs1_q`/`rs2_q`, written and never read) are kept in
+`ramrf.py` on purpose.  yosys deletes them (407 FF either way), but their
+presence in the RTL steers the ABC/nextpnr mapping: without them the core top
+costs **+144 LUT4 on every seed** (1327 vs 1183), a seed-invariant yosys result,
+while the fmax difference is inside the seed spread (means 70.52 vs 72.61,
+worsts 68.84 vs 68.24 over seeds 1/2/3/7 -- so quote the sweep, not seed 1).
+Same class of effect as the M8 multiplier's submodule boundary, and a toolchain
+artefact: re-measure after a yosys/ABC upgrade.
+
+The 4-LUT difference between the mask build (1369) and the pre-review tree
+(1373) is an ABC statement-order artefact, not logic: the two builds emit
+identical connectivity, and `Core` elaborates `RegFileRam(clear=False)`, so no
+clear logic exists in any committed netlist.
+
+**Critical path.** The claim to make precisely: the flop file's *read-mux and
+write-through* path is gone, and on the RAM builds the worst path is now
+
+* seeds 1/2/3 and FullTop: `fetch.imem` EBR clock-to-out **5.6 ns** -> decode
+  cone -> **regfile read address -> DPRAM read -> regfile read-data FF**
+  (i.e. the address-to-data path of the RAM file is the tail, not the bypass);
+* seed 7: `dx_a` -> `MULT18X18D` (3.9 ns) -> branch-target adder -> `x_value`.
+
+The exposed 5.6 ns EBR-to-decode hop is the M10 "decode in F" path showing through:
+with the flop file's mux tree in front of it, that hop was hidden.
+
+**Contract differences (why it stays an option, not the default):**
+
+1. Reads are registered: the address in cycle *C* appears in *C + 1*. The core
+   issues the read in F and consumes it in D; while D is stalled the address is
+   switched to D's own operands, otherwise the stall-release edge would capture
+   the operands of the instruction still in F (this was a real bug, caught by
+   `test_accumulation_loop_with_loads_and_stores_matches_golden` in
+   `tests/test_ramrf.py` -- the only test that fails when the mux is removed).
+2. There is no same-cycle write-through, so the operand select carries explicit
+   W (`w_hit`, a producer three instructions ahead) and W-1 (`wq_hit`, four
+   ahead) bypasses.  Both are load-bearing: zeroing either turns a test red.
+3. The array cannot be cleared by the synchronous reset: `DPR16X4` has no reset
+   and the contents come from the bitstream initialisation, so a mid-run reset
+   leaves the registers as they were.  `RegFileRam(clear=True)` adds a 16-cycle
+   zeroing walk of the write port (single-driver, tested).  The walk runs *after*
+   deassertion, so one cycle of reset suffices.  Counting from the first rising
+   edge after that deasserting edge, the last-written register reads zero one
+   cycle after the others (its write shares an edge with the read that exposes
+   it, read-first): cycles 16 and 17 for r14 and r15 in
+   `test_clear_walk_latency_matches_the_documented_count`, which pins the count.  While the walk runs the write port belongs to it, so a
+   software write in that window is dropped.
+
+The M9 and M10 full-top metric files (`m9_full.md`, `m10_full.md`) predate the
+generator change that annotates nextpnr's derived constraint, so their fmax lines
+still read "missed 600.24 MHz" -- that is nextpnr 0.7-1 deriving
+`f_in * CLKFB_DIV / CLKI_DIV` for the PLL output (see the M9b note above), not a
+missed target.  `m9_full.md` cannot be re-rendered at this head because its RTL
+is M9's; `m10_full.md` reproduces exactly.
+
+The flop file stays the default (fmax first, and it keeps the frozen reset
+guarantee). `docs/metrics/m11_core_ram.md`, `m11_full_ram.md` and
+`m11_core_flop.md` are the seed-1 runs.

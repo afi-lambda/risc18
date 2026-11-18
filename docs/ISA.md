@@ -19,6 +19,8 @@ return 0; stores outside are ignored. Addresses are computed modulo 2^16.
 All arithmetic is 18-bit and wraps; no overflow traps.
 
 Reset: synchronous, active high; PC = 0, all registers 0, no memory writes.
+(Exception: the optional RAM register file in section 5 cannot clear its array;
+see "Optional RAM register file" below.)
 
 ## 2. Instruction formats
 
@@ -218,6 +220,19 @@ word), so only a distance-1 load producer stalls. The EBR output lags the PC
 register by one edge; decode runs on that registered word and its 19 fields are
 captured into the FD register, so D sees decoded fields two edges after the PC
 became the fetch address.
+
+### Optional RAM register file
+
+`Core(ram_rf=True)` replaces section 5's flop register file with
+`risc18.ramrf.RegFileRam`, a 16 x 18 distributed-RAM array (`TRELLIS_DPR16X4`).
+Two logical read ports, one write port, `r0` reads zero and write-then-read
+ordering are all preserved, but three things differ: reads are registered (one
+cycle of latency, so the core issues them in F), the write-through bypass moves
+into the operand select, and the array is **not** cleared by the reset (it is
+zero only after configuration, so the section 5 reset contract above does not
+hold for this variant unless `RegFileRam(clear=True)` is used).
+The default core uses the flop register file described above; the RAM variant is
+an area/FF option, measured in `docs/metrics/NOTES.md` (`## M11`).
 
 Control transfer (M9+): the branch compare and the target adder run in X, on
 forwarded operands, and their result is registered as a control-transfer

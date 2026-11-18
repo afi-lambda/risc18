@@ -667,9 +667,9 @@ class CoreTop(Elaboratable):
     synchronous reset by a cycle for no benefit.
     """
 
-    def __init__(self, program=None):
+    def __init__(self, program=None, ram_rf=False):
         self.program = list(CORE_TOP_PROGRAM if program is None else program)
-        self.core = Core(self.program)
+        self.core = Core(self.program, ram_rf=ram_rf)
         # The core has no clock or reset ports of its own: the top's clk/rst
         # ports are the core's domain signals.
         self.clk = self.core.cd.clk
@@ -850,10 +850,10 @@ class FullTop(Elaboratable):
     ``tests/test_full.py``.
     """
 
-    def __init__(self, program=None):
+    def __init__(self, program=None, ram_rf=False):
         self.program = list(CORE_TOP_PROGRAM if program is None else program)
         self.pll = Pll()
-        self.core = Core(self.program)
+        self.core = Core(self.program, ram_rf=ram_rf)
         self.boot = BootReset()
         #: 25 MHz board oscillator: the *first* port, and named ``clk`` because
         #: ``tools/synth.py`` constrains ``FREQUENCY NET "clk"``.
