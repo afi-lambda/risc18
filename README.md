@@ -41,8 +41,9 @@ docs/ISA.md             normative ISA and interface contract
 docs/MILESTONES.md      milestone scopes and gates
 docs/RESULTS.md         M9 timing/resource report (measured)
 docs/HANDOFF.md         state of the design, gates and next steps
-sw/                     assembly test programs
 tests/                  pytest suites (Amaranth simulation + golden lockstep)
+docs/metrics/           committed synth metric summaries (post-route)
+design.txt              original design brief
 ```
 
 ## Status
