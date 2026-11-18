@@ -16,6 +16,7 @@ from .core6 import Core6
 from .decoder import PACK_WIDTH, Decoder, pack
 from .dmem import DEPTH as DMEM_DEPTH, DataMemory
 from .imem import DEPTH as IMEM_DEPTH, Fetch, InstrMemory
+from .hil import HilPll, HilStatus
 from .mul import Multiplier
 from .pc import BranchTarget, PCUnit
 from .pll import Pll
@@ -23,8 +24,8 @@ from .regfile import RegFile
 
 __all__ = ["AluTop", "BootReset", "BranchTargetTop", "BranchTop", "Core6Top",
            "CoreTop", "DataMemoryTop", "DecoderTop", "FetchTop", "Full6Top",
-           "FullTop", "InstrMemoryTop", "MulRegTop", "MulTop", "PcTop",
-           "RegFileTop", "CORE_TOP_PROGRAM", "CLKI6_DIV", "CLKFB6_DIV",
+           "FullTop", "HilTop", "InstrMemoryTop", "MulRegTop", "MulTop",
+           "PcTop", "RegFileTop", "CORE_TOP_PROGRAM", "CLKI6_DIV", "CLKFB6_DIV",
            "CLKOP6_DIV", "F_OUT6_MHZ"]
 
 
@@ -1070,6 +1071,145 @@ class Full6Top(Elaboratable):
             self.o_locked.eq(self.pll_locked),
         ]
 
+        cd = ClockDomain("measure")
+        m.domains += cd
+        m.d.comb += [cd.clk.eq(self.pll_clk), cd.rst.eq(self.boot_rst)]
+
+        m.d.measure += [
+            self.o_pc.eq(core.o_pc),
+            self.o_retire.eq(core.o_retire),
+            self.o_retire_pc.eq(core.o_retire_pc),
+            self.o_retire_we.eq(core.o_retire_we),
+            self.o_retire_rd.eq(core.o_retire_rd),
+            self.o_retire_value.eq(core.o_retire_value),
+            self.o_halt.eq(core.o_halt),
+        ]
+
+        return m
+
+
+# ---------------------------------------------------------------------------
+# Hardware-in-the-loop (stage 3a): FullTop plus the UART telemetry harness.
+# Additive: CoreTop/FullTop/Core6Top/Full6Top above are untouched, so their
+# committed metrics stay comparable.
+# ---------------------------------------------------------------------------
+
+
+class HilTop(Elaboratable):
+    """FullTop plus the first serial port in this repo: one line per boot.
+
+    Structure -- :class:`FullTop`'s shape, with the harness tapped onto the
+    core's retire trace::
+
+        clk (25 MHz, P6) -> EHXPLLL (CLKI_DIV=5, CLKFB_DIV=12, CLKOP_DIV=10)
+                             |-> CLKOP 60.000 MHz -> core ``sync`` domain
+                             |                     -> ``measure`` output shell
+                             |                     -> ``boot`` sequencer
+                             |                     -> ``hil`` counters/UART
+                             `-> LOCK -> BootReset -> core i_rst, hil i_rst
+
+        core.o_retire/o_retire_pc/o_retire_value/o_halt -> hil -> uart_tx (P11)
+
+    Ports: exactly :class:`FullTop`'s list, in the same order, with
+    ``uart_tx`` appended -- the harness adds one output and no inputs.  The
+    status values themselves are not ports: the line carries them, and
+    ``hil.cycles``/``hil.retires``/``hil.pc``/``hil.value`` stay visible as
+    attributes for the simulation tests.
+
+    Clock and reset: the harness runs in its own reset-bearing ``hil`` domain
+    clocked from ``pll_clk`` and reset from ``boot_rst``, i.e. from the same
+    ``BootReset`` output the core's synchronous reset comes from.  That is what
+    makes the on-board cycle count mean the same thing as the simulated one:
+    the counter is held at 0 exactly while the core is held in reset, and both
+    start on the edge that releases it.  The UART is in that domain too, so a
+    watchdog re-reset restarts the measurement instead of leaving a half-sent
+    line behind.
+
+    The PLL is :class:`risc18.hil.HilPll` -- the ``ecppll -i 25 -o 60``
+    instance -- and not :class:`risc18.pll.Pll`, which divides by ``CLKOP_DIV``
+    a second time and therefore asks its (1, 24, 10) default set for a 600 MHz
+    CLKOP and a 6 GHz VCO: nextpnr says so, and a heartbeat design clocked by
+    ``Pll()`` produces nothing on this board.  ``HilPll``'s docstring has the
+    measurement, ``docs/metrics/hil5.md`` records it, and ``FullTop`` is
+    untouched so its committed metrics stay comparable.
+
+    60 MHz closure: the harness is a 27-bit counter, a 16-bit counter, a
+    53-case character mux and a shift-register UART -- three LUT levels off the
+    same clock net as the core, so it does not become the critical path
+    (``docs/metrics/hil5.md`` has the routed fmax).
+
+    Board pinning is not in this file: the repo's ``tools/synth.py`` constrains
+    the clock only, so a loadable bitstream needs an LPF that adds ``LOCATE``
+    for ``clk`` (P6) and ``uart_tx`` (P11, LVCMOS33) -- the Colorlight 5A-75B
+    wiring the UART toolkit in ``~/try-serial`` already uses.  That LPF is a
+    build artifact of the board run, not part of this top.
+
+    Synthesis only: ``EHXPLLL`` has no simulator model, so the harness is
+    simulated through ``Core`` + ``HilStatus`` (``tests/test_hil.py``) and the
+    wiring of this top is pinned structurally on its Verilog.
+    """
+
+    def __init__(self, program=None, ram_rf=False, divisor=None):
+        self.program = list(CORE_TOP_PROGRAM if program is None else program)
+        #: The ecppll 25 -> 60 MHz instance; see the class docstring.
+        self.pll = HilPll()
+        self.core = Core(self.program, ram_rf=ram_rf)
+        self.boot = BootReset()
+        self.hil = HilStatus() if divisor is None else HilStatus(divisor=divisor)
+        #: 25 MHz board oscillator: the *first* port, named ``clk`` because
+        #: ``tools/synth.py`` constrains ``FREQUENCY NET "clk"``.
+        self.clk = Signal()
+        #: Named inter-module nets (as in :class:`FullTop`), so the wiring can
+        #: be pinned in the emitted Verilog.
+        self.pll_clk = Signal()
+        self.pll_locked = Signal()
+        self.boot_rst = Signal()
+        self.o_locked = Signal()
+        self.o_pc = Signal(16)
+        self.o_retire = Signal(1)
+        self.o_retire_pc = Signal(16)
+        self.o_retire_we = Signal(1)
+        self.o_retire_rd = Signal(4)
+        self.o_retire_value = Signal(isa.WIDTH)
+        self.o_halt = Signal(1)
+        #: The one added port: the UART line (idle high, 8N1).
+        self.uart_tx = Signal()
+        self.ports = [self.clk, self.o_locked, self.o_pc, self.o_retire,
+                      self.o_retire_pc, self.o_retire_we, self.o_retire_rd,
+                      self.o_retire_value, self.o_halt, self.uart_tx]
+
+    def elaborate(self, platform):
+        m = Module()
+        m.submodules.pll = pll = self.pll
+        m.submodules.boot = boot = self.boot
+        m.submodules.core = core = self.core
+        m.submodules.hil = hil = self.hil
+
+        m.d.comb += [
+            pll.i_clk.eq(self.clk),
+            self.pll_clk.eq(pll.o_clk),
+            self.pll_locked.eq(pll.o_locked),
+            self.boot_rst.eq(boot.o_rst),
+            boot.cd.clk.eq(self.pll_clk),
+            core.cd.clk.eq(self.pll_clk),
+            hil.cd.clk.eq(self.pll_clk),
+            # One reset for the core and the harness: the counters start on
+            # the edge that releases the core (see the class docstring).
+            hil.cd.rst.eq(self.boot_rst),
+            boot.i_locked.eq(self.pll_locked),
+            boot.i_halt.eq(core.o_halt),
+            core.i_rst.eq(self.boot_rst),
+            self.o_locked.eq(self.pll_locked),
+            # The harness only ever reads the retire trace.
+            hil.i_retire.eq(core.o_retire),
+            hil.i_retire_pc.eq(core.o_retire_pc),
+            hil.i_retire_value.eq(core.o_retire_value),
+            hil.i_halt.eq(core.o_halt),
+            self.uart_tx.eq(hil.o_tx),
+        ]
+
+        # Output shell, exactly as in FullTop: registered in the ``measure``
+        # domain so nextpnr measures the core's interior paths.
         cd = ClockDomain("measure")
         m.domains += cd
         m.d.comb += [cd.clk.eq(self.pll_clk), cd.rst.eq(self.boot_rst)]
