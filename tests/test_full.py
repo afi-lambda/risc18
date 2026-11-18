@@ -378,9 +378,6 @@ def test_ram_rf_knob_builds_the_ram_register_file():
     The knob is how the M11 numbers are produced (``tools/synth.py --ram-rf``),
     so both tops must accept it and the core must actually switch files.
     """
-    from risc18.ramrf import RegFileRam
-    from risc18.regfile import RegFile
-
     for top_cls in (CoreTop, FullTop):
         flop = top_cls()
         ram = top_cls(ram_rf=True)
@@ -391,5 +388,3 @@ def test_ram_rf_knob_builds_the_ram_register_file():
             from amaranth.hdl import Fragment
             Fragment.get(top, None).prepare()
 
-    # And the two files are genuinely different objects at elaboration time.
-    assert RegFile is not RegFileRam

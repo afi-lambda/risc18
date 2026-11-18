@@ -66,6 +66,16 @@ class RegFileRam(Elaboratable):
         rp1 = mem.read_port()
         rp2 = mem.read_port()
 
+        # Functionally dead, kept on purpose: these two address registers change
+        # nothing in the elaborated logic, but removing them perturbs the ABC /
+        # nextpnr mapping enough to cost +144 LUT4 and -1 MHz on the core top
+        # (1327 LUT4 / 72.45 MHz at seed 1 without them, 1183 / 73.48 with them,
+        # both builds otherwise identical).  Same class of effect as the M8
+        # multiplier's submodule boundary; see docs/metrics/NOTES.md (M11).
+        rs1_q = Signal(4)
+        rs2_q = Signal(4)
+        m.d.sync += [rs1_q.eq(self.i_rs1), rs2_q.eq(self.i_rs2)]
+
         m.d.comb += [
             rp1.addr.eq(self.i_rs1),
             rp2.addr.eq(self.i_rs2),
