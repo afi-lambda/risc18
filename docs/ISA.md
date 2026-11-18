@@ -19,6 +19,8 @@ return 0; stores outside are ignored. Addresses are computed modulo 2^16.
 All arithmetic is 18-bit and wraps; no overflow traps.
 
 Reset: synchronous, active high; PC = 0, all registers 0, no memory writes.
+(Exception: the optional RAM register file in section 5 cannot clear its array;
+see "Optional RAM register file" below.)
 
 ## 2. Instruction formats
 
@@ -223,11 +225,12 @@ became the fetch address.
 
 `Core(ram_rf=True)` replaces section 5's flop register file with
 `risc18.ramrf.RegFileRam`, a 16 x 18 distributed-RAM array (`TRELLIS_DPR16X4`).
-The architectural behaviour is unchanged — two logical read ports, one write
-port, `r0` reads zero, write-then-read ordering — but the *microarchitectural*
-contract differs: reads are registered (one cycle of latency, so the core issues
-them in F), the write-through bypass moves into the operand select, and the
-array is **not** cleared by the reset (it is zero only after configuration).
+Two logical read ports, one write port, `r0` reads zero and write-then-read
+ordering are all preserved, but three things differ: reads are registered (one
+cycle of latency, so the core issues them in F), the write-through bypass moves
+into the operand select, and the array is **not** cleared by the reset (it is
+zero only after configuration, so the section 5 reset contract above does not
+hold for this variant unless `RegFileRam(clear=True)` is used).
 The default core uses the flop register file described above; the RAM variant is
 an area/FF option, measured in `docs/metrics/NOTES.md` (`## M11`).
 

@@ -49,12 +49,17 @@ def halt():
     return isa.i_type(isa.OP_SYSTEM, 0, 0, isa.SYS_HALT)
 
 
+def nop():
+    return isa.i_type(isa.OP_SYSTEM, 0, 0, isa.SYS_NOP)
+
+
 # --- primitive harness ------------------------------------------------------
 
 class RamHarness(Elaboratable):
     """RegFileRam with the ``sync`` domain reset exposed as an input port."""
 
-    def __init__(self):
+    def __init__(self, clear=False):
+        self.clear = clear
         self.i_rst = Signal()
         self.i_rs1 = Signal(4)
         self.i_rs2 = Signal(4)
@@ -69,7 +74,7 @@ class RamHarness(Elaboratable):
         cd = ClockDomain("sync")
         m.domains += cd
         m.d.comb += cd.rst.eq(self.i_rst)
-        m.submodules.dut = dut = RegFileRam()
+        m.submodules.dut = dut = RegFileRam(clear=self.clear)
         m.d.comb += [
             dut.i_rs1.eq(self.i_rs1),
             dut.i_rs2.eq(self.i_rs2),
@@ -156,13 +161,56 @@ def test_write_is_visible_two_cycles_later():
     assert out[1][1] == (0x0AB, 0x0AB), out[1]
 
 
-def test_no_reset_clear_is_documented_behaviour():
-    """The array cannot be cleared by the sync reset (DPR16X4 has none)."""
-    out = run_ram([
-        {"we": 1, "rd": 9, "wdata": 0x155},
-        {"rs1": 9, "rs2": 9},
-    ])
-    assert out[1][1] == (0x155, 0x155)
+def _drive_with_reset(clear):
+    """Write r9, pulse reset, read r9 back: returns the value after the reset."""
+    harness = RamHarness(clear=clear)
+    sim = Simulator(harness)
+    sim.add_clock(CLK_PERIOD, domain="sync")
+    got = {}
+
+    async def tb(ctx):
+        ctx.set(harness.i_rst, 1)
+        await ctx.tick()
+        ctx.set(harness.i_rst, 0)
+        # write r9 = 0x155
+        ctx.set(harness.i_we, 1)
+        ctx.set(harness.i_rd, 9)
+        ctx.set(harness.i_wdata, 0x155)
+        await ctx.tick()
+        ctx.set(harness.i_we, 0)
+        # pulse the synchronous reset long enough for the clear sequence
+        ctx.set(harness.i_rst, 1)
+        for _ in range(20):
+            await ctx.tick()
+        ctx.set(harness.i_rst, 0)
+        # address r9 and sample the data one cycle later
+        ctx.set(harness.i_rs1, 9)
+        ctx.set(harness.i_rs2, 9)
+        await ctx.tick()
+        await ctx.tick()
+        await ctx.delay(SETTLE)
+        got["rs1"] = ctx.get(harness.o_rs1)
+        got["rs2"] = ctx.get(harness.o_rs2)
+
+    sim.add_testbench(tb)
+    sim.run()
+    return got
+
+
+def test_reset_does_not_clear_the_array_by_default():
+    """Documented deviation from section 5: DPR16X4 has no reset.
+
+    The flop register file clears every register on the synchronous reset; this
+    primitive cannot, so an opt-in RAM file keeps its contents across a reset.
+    Designers who need the frozen contract use ``RegFileRam(clear=True)``.
+    """
+    got = _drive_with_reset(clear=False)
+    assert got == {"rs1": 0x155, "rs2": 0x155}, got
+
+
+def test_clear_option_zeroes_the_array_on_reset():
+    got = _drive_with_reset(clear=True)
+    assert got == {"rs1": 0, "rs2": 0}, got
 
 
 # --- core-level: the bypasses the RAM form needs ----------------------------
@@ -210,22 +258,33 @@ def _check(program, data=None):
 
 
 def test_distance_one_two_three_and_four_dependencies_are_all_forwarded():
-    """Every distance the pipeline can produce: X, M, W and W-1 bypasses."""
+    """Every producer distance the pipeline can present: X, M, W and W-1.
+
+    ``i`` produces, ``i+1`` is distance 1 (X bypass), ``i+2`` distance 2 (M),
+    ``i+3`` distance 3 (W, and on the RAM file the ``w_hit`` bypass) and
+    ``i+4`` distance 4 (W-1, the ``wq_hit`` bypass).
+    """
     program = [
-        addi(1, 0, 1),        # 0
-        addi(2, 1, 1),        # 1: distance 1 from r1 (X bypass)
-        addi(3, 2, 1),        # 2: distance 1 from r2
-        addi(4, 1, 4),        # 3: distance 2 from r1 (now in M)
-        addi(5, 2, 5),        # 4: distance 3 from r2 (now in W)
-        addi(6, 3, 6),        # 5: distance 4 from r3 (now retired, W-1)
-        addi(7, 4, 7),        # 6: distance 3 from r4
-        addi(8, 5, 8),        # 7: distance 3 from r5
-        alu(isa.ALU_ADD, 9, 6, 8),   # 8: distance 2 and 1
-        halt(),               # 9
+        addi(1, 0, 1),        # 0: producer, consumer at 1 is distance 1
+        addi(2, 1, 1),        # 1: r2 = r1 + 1 = 2
+        nop(),                # 2
+        addi(3, 2, 1),        # 3: r3 = r2 + 1 = 3, distance 2
+        nop(),                # 4
+        nop(),                # 5
+        addi(4, 3, 1),        # 6: r4 = r3 + 1 = 4, distance 3
+        nop(),                # 7
+        nop(),                # 8
+        nop(),                # 9
+        addi(5, 4, 1),        # 10: r5 = r4 + 1 = 5, distance 4
+        alu(isa.ALU_ADD, 6, 5, 5),   # 11: r6 = 10, distance 1
+        halt(),               # 12
     ]
     rows = _check(program)
-    # r1=1, r2=2, r3=3, r4=5, r5=7, r6=9, r7=12, r8=15, r9 = r6 + r8 = 24
-    assert rows[-2][3] == 24, rows[-2]
+    writes = {rd: v for _, rd, v in
+              [(pc, rd, v) for pc, we, rd, v in rows if we and rd != 0]}
+    assert writes[2] == 2 and writes[3] == 3 and writes[4] == 4
+    assert writes[5] == 5, writes
+    assert writes[6] == 10, writes
 
 
 def test_load_use_stall_reads_the_right_operand_after_the_bubble():

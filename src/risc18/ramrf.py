@@ -74,29 +74,33 @@ class RegFileRam(Elaboratable):
         m.d.comb += [
             rp1.addr.eq(self.i_rs1),
             rp2.addr.eq(self.i_rs2),
-            wp.addr.eq(self.i_rd),
-            wp.data.eq(self.i_wdata),
-            wp.en.eq(self.i_we & (self.i_rd != 0)),
-            self.o_rs1.eq(Mux(rs1_q == 0, 0, rp1.data)),
-            self.o_rs2.eq(Mux(rs2_q == 0, 0, rp2.data)),
+            # ``r0`` is protected at the write port only: the array initialises
+            # to zero from the bitstream, the write enable discards ``i_rd == 0``
+            # and nothing else can write, so an output-side mask would be
+            # untestable duplicate logic.
+            self.o_rs1.eq(rp1.data),
+            self.o_rs2.eq(rp2.data),
         ]
 
         if self.clear:
-            # Zeroing sequence: while ``clr_run`` is low after reset, walk the
-            # write port through all 16 entries.  ``i_rst`` is the ``sync``
-            # domain reset, so the counter starts at 0 on every reset.
+            # Zeroing sequence: a 16-cycle walk of the write port after reset.
+            # The port is driven from *one* place (this comb block) so the two
+            # sources cannot conflict; ``busy`` resets high, so the sequence
+            # restarts on every synchronous reset.
             cnt = Signal(4)
             busy = Signal(1, init=1)
             with m.If(busy):
-                m.d.sync += [
-                    cnt.eq(cnt + 1),
-                    wp.addr.eq(cnt),
-                    wp.data.eq(0),
-                    wp.en.eq(1),
-                ]
-                with m.If(cnt == 15):
-                    m.d.sync += [busy.eq(0), cnt.eq(0)]
-            with m.Else():
-                m.d.sync += busy.eq(0)
+                m.d.sync += [cnt.eq(cnt + 1), busy.eq(cnt != 15)]
+            m.d.comb += [
+                wp.addr.eq(Mux(busy, cnt, self.i_rd)),
+                wp.data.eq(Mux(busy, 0, self.i_wdata)),
+                wp.en.eq(Mux(busy, 1, self.i_we & (self.i_rd != 0))),
+            ]
+        else:
+            m.d.comb += [
+                wp.addr.eq(self.i_rd),
+                wp.data.eq(self.i_wdata),
+                wp.en.eq(self.i_we & (self.i_rd != 0)),
+            ]
 
         return m

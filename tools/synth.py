@@ -32,12 +32,12 @@ PACKAGE = "CABGA256"
 SPEED = "6"
 
 
-def load_top(spec: str):
+def load_top(spec: str, **top_kwargs):
     mod_name, _, attr = spec.partition(":")
     if not attr:
         raise SystemExit(f"--top must be module:attr, got {spec!r}")
     mod = importlib.import_module(mod_name)
-    top = getattr(mod, attr)()
+    top = getattr(mod, attr)(**top_kwargs)
     ports = getattr(top, "ports", None)
     if ports is None:
         raise SystemExit(f"{spec} has no .ports attribute")
@@ -124,6 +124,9 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--no-pnr", action="store_true",
                     help="stop after yosys (unit tops without a clock)")
+    ap.add_argument("--ram-rf", action="store_true",
+                    help="build the core with the distributed-RAM register file "
+                         "(CoreTop/FullTop only)")
     ap.add_argument("--pnr-arg", action="append", default=[], metavar="ARG",
                     help="extra nextpnr-ecp5 argument, repeatable "
                          "(e.g. --pnr-arg=--placer-heap-timingweight --pnr-arg=50)")
@@ -135,7 +138,7 @@ def main():
     metrics_dir = ROOT / args.out / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
-    top, ports = load_top(args.top)
+    top, ports = load_top(args.top, **({"ram_rf": True} if args.ram_rf else {}))
     v = verilog.convert(top, name="top", ports=ports)
     (out / "top.v").write_text(v)
 

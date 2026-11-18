@@ -1,4 +1,4 @@
-# m11_core_flop_s1
+# m11_core_flop (seed 1, flop register file)
 
 top: `risc18.tops:CoreTop`  
 device: `LFE5U-25F-6CABGA256`  

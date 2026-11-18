@@ -284,49 +284,69 @@ stays "four seeds, quote the worst".
 
 ## M11: RAM register file (distributed `TRELLIS_DPR16X4`, not EBR)
 
-The core can build its register file from a 16 x 18 Amaranth ``Memory``
-(``Core(ram_rf=True)``, ``risc18.ramrf.RegFileRam``) instead of 270 flops plus
-two 16:1 x 18-bit read muxes.  What yosys actually produces is **two replicated
-banks of five `TRELLIS_DPR16X4` distributed-RAM cells** (10 cells, no EBR, no
-array flops): the memory has one write and two read ports, so the two read ports
-force one replica each, and each replica gets its own write port.
+`Core(ram_rf=True)` (and `tools/synth.py --ram-rf`, `CoreTop(..., ram_rf=True)`,
+`FullTop(..., ram_rf=True)`) builds the register file from a 16 x 18 Amaranth
+``Memory`` (`risc18.ramrf.RegFileRam`) instead of 270 flops plus two 16:1 x 18-bit
+read muxes. yosys maps it to **two replicated banks of five `TRELLIS_DPR16X4`
+distributed-RAM cells** (10 cells, **0 EBR**, no flops for the array): the memory
+has one write and two read ports, so each read port forces a replica with its own
+write port.
 
-It is *not* an EBR solution.  One DP16KD would hold 16 x 18 bits in about 1 % of
-its capacity, and a true dual-port EBR has only two ports, so it cannot serve
-two reads plus one write per cycle without a third port.  At 16 entries the
-distributed RAM is the primitive the hardware offers.
+It is not an EBR design. One DP16KD would hold 16 x 18 bits in ~1 % of its
+capacity, and a true dual-port EBR has only two ports, so it cannot serve two
+reads plus one write per cycle. At 16 entries the distributed-RAM primitive is
+the one the device offers.
+
+Reproduce (seed 1; the sweep is the same command with `--seed 2|3|7`):
+
+```
+.venv/bin/python tools/synth.py --top risc18.tops:CoreTop --name m11c_ram_s1 \
+    --freq 60 --seed 1 --ram-rf
+.venv/bin/python tools/synth.py --top risc18.tops:FullTop --name m11f_ram_s1 \
+    --freq 25 --seed 1 --ram-rf
+```
 
 | build (CoreTop, 60 MHz) | LUT4 | FF | DPR16X4 | fmax seeds 1/2/3/7 | mean | worst |
 |---|---|---|---|---|---|---|
 | M10 flop register file (default) | 1640 | 640 | 0 | 71.03 / 75.59 / 72.14 / 73.61 | 73.09 | 71.03 |
-| M11 RAM register file | **1373** | **415** | 10 | 65.87 / 73.42 / 69.00 / 71.47 | 69.94 | 65.87 |
+| M11 RAM register file | **1183** | **407** | 10 | 73.48 / 75.27 / 68.24 / 73.44 | 72.61 | 68.24 |
 
--267 LUT4 (-16.3 %), -225 FF (-35 %), and 0 EBR either way.  FullTop with the RAM
-file: 1295 LUT4 / 445 FF / 73.40 MHz at seed 1 (flop file: 1620 / 670 / 73.45).
+-457 LUT4 (-27.9 %), -233 FF (-36.4 %), 0 EBR either way.  FullTop seed 1 with the
+RAM file: 1272 LUT4 / 437 FF / **67.59 MHz** (flop file: 1620 / 670 / 73.45) -- so
+the chip-level top loses 5.9 MHz even though the core top is roughly neutral.
 
-**Cost:** -3.2 MHz mean, -5.2 MHz worst case.  The register-file read path
-leaves the critical path entirely, and the wall moves to two other paths:
+Removing the two output-side `r0` masks was worth -190 LUT4 and +7.6 MHz on its
+own (1373 / 415 / 65.87-73.42 before): `r0` cannot be written (the write enable
+discards `i_rd == 0`) and the array initialises to zero, so the masks were
+duplicate logic that also pushed the RAM output through an extra mux.
 
-* seeds 2/3 and FullTop: `fetch.imem` EBR clock-to-out **5.6 ns** -> decode cone
-  -> FD capture (the M10 "decode in F" path, now exposed);
-* seeds 1/7: `dx_a` -> `MULT18X18D` (3.9 ns) -> branch target adder -> `x_value`.
+**Critical path.** The claim to make precisely: the flop file's *read-mux and
+write-through* path is gone, and on the RAM builds the worst path is now
 
-**Contract differences (why it is not the default):**
+* seeds 1/2/3 and FullTop: `fetch.imem` EBR clock-to-out **5.6 ns** -> decode
+  cone -> **regfile read address -> DPRAM read -> regfile read-data FF**
+  (i.e. the address-to-data path of the RAM file is the tail, not the bypass);
+* seed 7: `dx_a` -> `MULT18X18D` (3.9 ns) -> branch-target adder -> `x_value`.
 
-1. Reads are registered: the address in cycle *C* appears in *C + 1*.  The core
-   issues the read in F (decode fields are available there since M10) and
-   consumes it in D.  While D is stalled the address is switched to D's own
-   operands, otherwise the release edge would capture the operands of the
-   instruction still in F.
+The exposed 5.6 ns EBR-to-decode hop is the M10 "decode in F" path showing through:
+with the flop file's mux tree in front of it, that hop was hidden.
+
+**Contract differences (why it stays an option, not the default):**
+
+1. Reads are registered: the address in cycle *C* appears in *C + 1*. The core
+   issues the read in F and consumes it in D; while D is stalled the address is
+   switched to D's own operands, otherwise the stall-release edge would capture
+   the operands of the instruction still in F (this was a real bug, caught by
+   `test_memory_accumulation_loop_matches_golden` and the seeded chain test).
 2. There is no same-cycle write-through, so the operand select carries explicit
-   W and W-1 bypasses (`w_hit`, `wq_hit`); both are needed because the read is
-   sampled one cycle before the value is used.
+   W (`w_hit`, a producer three instructions ahead) and W-1 (`wq_hit`, four
+   ahead) bypasses.  Both are load-bearing: zeroing either turns a test red.
 3. The array cannot be cleared by the synchronous reset: `DPR16X4` has no reset
-   and the contents come from the bitstream initialisation.  A mid-run reset
-   therefore leaves the registers as they were.  `RegFileRam(clear=True)` adds a
-   16-cycle zeroing sequence on the write port for designs that need the frozen
-   contract, but it needs the reset held for 16 cycles.
+   and the contents come from the bitstream initialisation, so a mid-run reset
+   leaves the registers as they were.  `RegFileRam(clear=True)` adds a 16-cycle
+   zeroing sequence on the write port (single-driver, tested); it needs the reset
+   held for 16 cycles.
 
-The flop file stays the default (fmax first); the RAM file is a one-argument
-option for area- or FF-constrained variants.  `docs/metrics/m11_core_ram.md` and
-`m11_full_ram.md` are the seed-1 RAM runs, `m11_core_flop.md` the flop baseline.
+The flop file stays the default (fmax first, and it keeps the frozen reset
+guarantee). `docs/metrics/m11_core_ram.md`, `m11_full_ram.md` and
+`m11_core_flop.md` are the seed-1 runs.

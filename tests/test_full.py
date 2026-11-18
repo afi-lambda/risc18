@@ -335,9 +335,10 @@ def test_full_top_wiring_is_exactly_the_documented_one():
                                                           v.index("\\top.pll  pll (")]))
     # The retire value's port name is mangled by Amaranth, so find it by stem.
     # The writeback port's Verilog name depends on how the register file
-    # consumes it: the flop file's write-through mux mangles ``i_wdata`` into
-    # ``i_wdata$N``, while the RAM file drives ``w_value`` straight into the
-    # memory write port, so the port keeps its name.  Accept either.
+    # consumes it: the write-through mux of the flop file mangles ``i_wdata``
+    # into ``i_wdata$N``, and a build that drives the memory write port directly
+    # can leave it as ``w_value``.  No committed top produces the second form
+    # today; the fallback keeps the pin working for a ``--ram-rf`` FullTop build.
     value_port = next(k for k in core_ports
                       if "wdata" in k or k == "w_value")
     for out, port in (("o_pc", "o_pc"), ("o_retire", "w_valid"),

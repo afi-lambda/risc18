@@ -62,4 +62,4 @@ design.txt              original design brief
 | M8 DSP multiplier | done |
 | M9 timing closure | done (CoreTop 65.8-73.9 MHz, FullTop with PLL 64.2-74.5 MHz; docs/RESULTS.md) |
 | M10 decode in F | done (CoreTop 71.0-75.6 MHz, 1640 LUT4, 640 FF; docs/metrics/m10_core.md) |
-| M11 RAM register file | done as an option (1373 LUT4, 415 FF, 65.9-73.4 MHz; flop file stays the default; docs/metrics/NOTES.md) |
+| M11 RAM register file | done as an option (1183 LUT4, 407 FF, 68.2-75.3 MHz core, 67.6 MHz full chip; flop file stays the default; docs/metrics/NOTES.md) |
