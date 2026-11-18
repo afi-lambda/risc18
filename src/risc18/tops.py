@@ -12,6 +12,7 @@ from . import isa
 from .alu import ALU
 from .branch import BranchUnit
 from .core import Core
+from .core6 import Core6
 from .decoder import PACK_WIDTH, Decoder, pack
 from .dmem import DEPTH as DMEM_DEPTH, DataMemory
 from .imem import DEPTH as IMEM_DEPTH, Fetch, InstrMemory
@@ -20,10 +21,11 @@ from .pc import BranchTarget, PCUnit
 from .pll import Pll
 from .regfile import RegFile
 
-__all__ = ["AluTop", "BootReset", "BranchTargetTop", "BranchTop", "CoreTop",
-           "DataMemoryTop", "DecoderTop", "FetchTop", "FullTop",
-           "InstrMemoryTop", "MulRegTop", "MulTop", "PcTop", "RegFileTop",
-           "CORE_TOP_PROGRAM"]
+__all__ = ["AluTop", "BootReset", "BranchTargetTop", "BranchTop", "Core6Top",
+           "CoreTop", "DataMemoryTop", "DecoderTop", "FetchTop", "Full6Top",
+           "FullTop", "InstrMemoryTop", "MulRegTop", "MulTop", "PcTop",
+           "RegFileTop", "CORE_TOP_PROGRAM", "CLKI6_DIV", "CLKFB6_DIV",
+           "CLKOP6_DIV", "F_OUT6_MHZ"]
 
 
 def _b(op, rs2, rs1, imm6):
@@ -902,6 +904,172 @@ class FullTop(Elaboratable):
 
         # Output shell: registered, same clock, reset from the sequencer (a
         # separate domain object because the core owns ``sync``).
+        cd = ClockDomain("measure")
+        m.domains += cd
+        m.d.comb += [cd.clk.eq(self.pll_clk), cd.rst.eq(self.boot_rst)]
+
+        m.d.measure += [
+            self.o_pc.eq(core.o_pc),
+            self.o_retire.eq(core.o_retire),
+            self.o_retire_pc.eq(core.o_retire_pc),
+            self.o_retire_we.eq(core.o_retire_we),
+            self.o_retire_rd.eq(core.o_retire_rd),
+            self.o_retire_value.eq(core.o_retire_value),
+            self.o_halt.eq(core.o_halt),
+        ]
+
+        return m
+
+
+# ---------------------------------------------------------------------------
+# Six-stage (Core6) tops.  Additive: CoreTop/FullTop above are untouched, so
+# the M9/M11 metrics stay comparable against the heads that produced them.
+# ---------------------------------------------------------------------------
+
+#: Divider set that turns the 25 MHz board clock into 120.000 MHz exactly:
+#: ``f_out = 25 * 24 / (1 * 5) = 120.000 MHz``, VCO ``= 25 * 24 = 600 MHz``.
+#: Every value is inside the bands :class:`risc18.pll.Pll` checks at
+#: construction time (PFD 25 MHz in 10-400, VCO 600 MHz in 400-800,
+#: ``CLKOP_DIV`` 5 <= 128, counters <= 80), so the wrapper accepts this set
+#: unchanged -- no edit to ``pll.py`` was needed.
+CLKI6_DIV = 1
+CLKFB6_DIV = 24
+CLKOP6_DIV = 5
+
+#: Output frequency of that divider set, MHz.
+F_OUT6_MHZ = 25.0 * CLKFB6_DIV / (CLKI6_DIV * CLKOP6_DIV)
+
+
+class Core6Top(Elaboratable):
+    """Registered-output measurement shell around :class:`risc18.core6.Core6`.
+
+    The six-stage twin of :class:`CoreTop`: same ports, same list order, same
+    ``measure`` shell, same clock/reset ownership (the core owns the
+    reset-bearing ``sync`` domain, so the top's ``clk``/``i_rst`` *are* that
+    domain's signals and the netlist has one clock net and no generated reset
+    port).  The only difference is the core, which cuts the fetch path in two:
+    ``F1`` is PC register -> EBR -> fetch register ``fq`` (no decode, no
+    register-file read), and the decode plus the read-address select are what
+    ``F2`` registers into FD.
+
+    That is what makes this top measurable rather than merely available: at
+    60 MHz the five-stage ``CoreTop`` was already the *fmax* reference, so a
+    six-stage build at the same constraint only has to beat it, while
+    :class:`Full6Top` is where the 120 MHz gate is taken.
+
+    Synthesis only, like ``CoreTop``: no simulator model is needed here and
+    ``tests/test_core6.py`` already covers the core behaviourally.
+    """
+
+    def __init__(self, program=None, ram_rf=False):
+        self.program = list(CORE_TOP_PROGRAM if program is None else program)
+        self.core = Core6(self.program, ram_rf=ram_rf)
+        self.clk = self.core.cd.clk
+        self.i_rst = self.core.i_rst
+        self.o_pc = Signal(16)
+        self.o_retire = Signal(1)
+        self.o_retire_pc = Signal(16)
+        self.o_retire_we = Signal(1)
+        self.o_retire_rd = Signal(4)
+        self.o_retire_value = Signal(isa.WIDTH)
+        self.o_halt = Signal(1)
+        self.ports = [self.clk, self.i_rst, self.o_pc, self.o_retire,
+                      self.o_retire_pc, self.o_retire_we, self.o_retire_rd,
+                      self.o_retire_value, self.o_halt]
+
+    def elaborate(self, platform):
+        m = Module()
+        cd = ClockDomain("measure")
+        m.domains += cd
+        m.d.comb += [cd.clk.eq(self.clk), cd.rst.eq(self.i_rst)]
+        m.submodules.core = self.core
+
+        m.d.measure += [
+            self.o_pc.eq(self.core.o_pc),
+            self.o_retire.eq(self.core.o_retire),
+            self.o_retire_pc.eq(self.core.o_retire_pc),
+            self.o_retire_we.eq(self.core.o_retire_we),
+            self.o_retire_rd.eq(self.core.o_retire_rd),
+            self.o_retire_value.eq(self.core.o_retire_value),
+            self.o_halt.eq(self.core.o_halt),
+        ]
+
+        return m
+
+
+class Full6Top(Elaboratable):
+    """Full-chip six-stage top: 25 MHz board clock -> PLL -> 120.000 MHz core.
+
+    Structurally :class:`FullTop` with :class:`risc18.core6.Core6` inside and a
+    PLL divider set changed from ``(1, 24, 10)`` to ``(1, 24, 5)``::
+
+        clk (25 MHz) -> EHXPLLL (CLKI_DIV=1, CLKFB_DIV=24, CLKOP_DIV=5)
+                          |-> CLKOP 120.000 MHz -> core ``sync`` domain
+                          |                      -> ``measure`` shell domain
+                          |                      -> ``boot`` sequencer domain
+                          `-> LOCK -> BootReset -> core i_rst
+
+    120.000 MHz is exact (0 Hz error, 0 ppm): the VCO stays at 600 MHz, which is
+    the same VCO the 60 MHz top uses, so only the output divider changes and the
+    lock behaviour of the loop is unchanged.  The set is legal for
+    :class:`risc18.pll.Pll` as shipped -- PFD 25 MHz, VCO 600 MHz,
+    ``CLKOP_DIV = 5 <= 128`` -- so the wrapper accepts it unchanged.
+
+    Reset and watchdog are :class:`BootReset` exactly as in ``FullTop``
+    (``BOOT_HOLD`` clocks after LOCK, then release; ``2**WDOG_BITS`` clocks of
+    no-retire re-resets the core).  At 120 MHz those windows are half the
+    duration they are at 60 MHz: 67 ns of hold and 559 ms of watchdog, both
+    still far longer than the 24-cycle measurement program and short enough
+    that a hang is visible.
+
+    Synthesis only: ``EHXPLLL`` has no simulator model, so the PLL is checked
+    structurally (``tests/test_tops6.py``) and the sequencer behaviourally
+    through ``BootReset`` (``tests/test_full.py``).
+    """
+
+    def __init__(self, program=None, ram_rf=False):
+        self.program = list(CORE_TOP_PROGRAM if program is None else program)
+        self.pll = Pll(clki_div=CLKI6_DIV, clkfb_div=CLKFB6_DIV,
+                       clkop_div=CLKOP6_DIV)
+        self.core = Core6(self.program, ram_rf=ram_rf)
+        self.boot = BootReset()
+        #: 25 MHz board oscillator: the *first* port, named ``clk`` because
+        #: ``tools/synth.py`` constrains ``FREQUENCY NET "clk"``.
+        self.clk = Signal()
+        self.pll_clk = Signal()
+        self.pll_locked = Signal()
+        self.boot_rst = Signal()
+        self.o_locked = Signal()
+        self.o_pc = Signal(16)
+        self.o_retire = Signal(1)
+        self.o_retire_pc = Signal(16)
+        self.o_retire_we = Signal(1)
+        self.o_retire_rd = Signal(4)
+        self.o_retire_value = Signal(isa.WIDTH)
+        self.o_halt = Signal(1)
+        self.ports = [self.clk, self.o_locked, self.o_pc, self.o_retire,
+                      self.o_retire_pc, self.o_retire_we, self.o_retire_rd,
+                      self.o_retire_value, self.o_halt]
+
+    def elaborate(self, platform):
+        m = Module()
+        m.submodules.pll = pll = self.pll
+        m.submodules.boot = boot = self.boot
+        m.submodules.core = core = self.core
+
+        m.d.comb += [
+            pll.i_clk.eq(self.clk),
+            self.pll_clk.eq(pll.o_clk),
+            self.pll_locked.eq(pll.o_locked),
+            self.boot_rst.eq(boot.o_rst),
+            boot.cd.clk.eq(self.pll_clk),
+            core.cd.clk.eq(self.pll_clk),
+            boot.i_locked.eq(self.pll_locked),
+            boot.i_halt.eq(core.o_halt),
+            core.i_rst.eq(self.boot_rst),
+            self.o_locked.eq(self.pll_locked),
+        ]
+
         cd = ClockDomain("measure")
         m.domains += cd
         m.d.comb += [cd.clk.eq(self.pll_clk), cd.rst.eq(self.boot_rst)]
