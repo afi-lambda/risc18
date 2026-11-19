@@ -13,6 +13,7 @@ from .alu import ALU
 from .branch import BranchUnit
 from .core import Core
 from .core6 import Core6
+from .core7 import Core7
 from .decoder import PACK_WIDTH, Decoder, pack
 from .dmem import DEPTH as DMEM_DEPTH, DataMemory
 from .imem import DEPTH as IMEM_DEPTH, Fetch, InstrMemory
@@ -23,10 +24,10 @@ from .pll import Pll
 from .regfile import RegFile
 
 __all__ = ["AluTop", "BootReset", "BranchTargetTop", "BranchTop", "Core6Top",
-           "CoreTop", "DataMemoryTop", "DecoderTop", "FetchTop", "Full6Top",
-           "FullTop", "HilTop", "InstrMemoryTop", "MulRegTop", "MulTop",
-           "PcTop", "RegFileTop", "CORE_TOP_PROGRAM", "CLKI6_DIV", "CLKFB6_DIV",
-           "CLKOP6_DIV", "F_OUT6_MHZ"]
+           "Core7Top", "CoreTop", "DataMemoryTop", "DecoderTop", "FetchTop",
+           "Full6Top", "FullTop", "HilTop", "InstrMemoryTop", "MulRegTop",
+           "MulTop", "PcTop", "RegFileTop", "CORE_TOP_PROGRAM", "CLKI6_DIV",
+           "CLKFB6_DIV", "CLKOP6_DIV", "F_OUT6_MHZ"]
 
 
 def _b(op, rs2, rs1, imm6):
@@ -967,6 +968,58 @@ class Core6Top(Elaboratable):
     def __init__(self, program=None, ram_rf=False):
         self.program = list(CORE_TOP_PROGRAM if program is None else program)
         self.core = Core6(self.program, ram_rf=ram_rf)
+        self.clk = self.core.cd.clk
+        self.i_rst = self.core.i_rst
+        self.o_pc = Signal(16)
+        self.o_retire = Signal(1)
+        self.o_retire_pc = Signal(16)
+        self.o_retire_we = Signal(1)
+        self.o_retire_rd = Signal(4)
+        self.o_retire_value = Signal(isa.WIDTH)
+        self.o_halt = Signal(1)
+        self.ports = [self.clk, self.i_rst, self.o_pc, self.o_retire,
+                      self.o_retire_pc, self.o_retire_we, self.o_retire_rd,
+                      self.o_retire_value, self.o_halt]
+
+    def elaborate(self, platform):
+        m = Module()
+        cd = ClockDomain("measure")
+        m.domains += cd
+        m.d.comb += [cd.clk.eq(self.clk), cd.rst.eq(self.i_rst)]
+        m.submodules.core = self.core
+
+        m.d.measure += [
+            self.o_pc.eq(self.core.o_pc),
+            self.o_retire.eq(self.core.o_retire),
+            self.o_retire_pc.eq(self.core.o_retire_pc),
+            self.o_retire_we.eq(self.core.o_retire_we),
+            self.o_retire_rd.eq(self.core.o_retire_rd),
+            self.o_retire_value.eq(self.core.o_retire_value),
+            self.o_halt.eq(self.core.o_halt),
+        ]
+
+        return m
+
+
+class Core7Top(Elaboratable):
+    """Registered-output measurement shell around :class:`risc18.core7.Core7`.
+
+    The seven-stage twin of :class:`Core6Top`: same ports, same list order, same
+    ``measure`` shell, same clock/reset ownership (the core owns the
+    reset-bearing ``sync`` domain, so the top's ``clk``/``i_rst`` *are* that
+    domain's signals and the netlist has one clock net and no generated reset
+    port).  What differs is the pipeline: the operand registers of the R stage
+    sit between the decode/register-file read and the ALU, and both memories are
+    latency 2 by edge contract -- the instruction EBR's clock-to-out stands
+    alone in the IQ cycle and the data EBR's in the M cycle.
+
+    Synthesis only, like ``CoreTop``/``Core6Top``: no simulator model is needed
+    here and ``tests/test_core7.py`` already covers the core behaviourally.
+    """
+
+    def __init__(self, program=None):
+        self.program = list(CORE_TOP_PROGRAM if program is None else program)
+        self.core = Core7(self.program)
         self.clk = self.core.cd.clk
         self.i_rst = self.core.i_rst
         self.o_pc = Signal(16)
