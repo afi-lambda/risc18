@@ -528,3 +528,39 @@ matter for a single-cycle `EBR -> ALU -> EBR`, and reaching it is a toolchain pr
 not an RTL flag. Parked. Note that both modes present data in the cycle after the
 address is sampled, so OUTREG would cost no extra latency if it ever lands: it moves a
 register from fabric into the block, it does not add a pipeline stage.
+
+## P0b: the realistic X stage does NOT close 120 MHz
+
+`src/risc18/probe_six_stages.py`, `ProbeXstageRF` / `ProbeXstageRFNoTgt`, 120 MHz
+constraint, post-route. The probe is the review's P0b requirement made concrete: a
+16x18 two-read one-write distributed-RAM register file (TRELLIS_DPR16X4), a W->X bypass
+mux, the ALU (add / mul / and / or / imm select), the compare, and -- in the `RF`
+variant only -- the PC-relative target adder. Everything in one cycle:
+
+| probe | seeds 1 / 3 | period | logic | routing |
+|---|---|---:|---:|---:|
+| `ProbeXstageRF` (file + bypass + ALU + compare + **target**) | 83.38 / 83.43 MHz | 12.0 ns | 5.4 | 6.6 |
+| `ProbeXstageRFNoTgt` (target adder moved to D) | 83.84 / 83.76 MHz | 11.9 ns | 5.4-5.6 | 6.4-6.5 |
+
+Two things follow, and the second one is the important one:
+
+1. **Moving the target adder to D buys 0.4 MHz.** The review's recommendation is still
+   correct on first principles, but it is not the fix: the target adder is not the cost.
+2. **The operand path is the cost.** Register-file read + bypass select + op select
+   measure 5.4-5.6 ns of logic and 6.4-6.6 ns of routing, and both seeds agree to 0.1
+   MHz, so this is structural, not seed noise. The same ALU with operands already in
+   registers measures 5.5 ns / **181.79 MHz** (`ProbeXstageNoMul`), and the fetch-input
+   stage measures 149.93 MHz. The gap is entirely "read the file and select the forward
+   in the same cycle as the execute".
+
+Consequence: the 6-stage contract as written (X = file read + bypass + ALU + compare)
+caps at ~84 MHz and cannot be rescued by placement weighting -- raising
+`--placer-heap-timingweight` from 10 to 50 moved `Full6Top` seed 1 from 78.35 to 83.29
+MHz, and to 200 moved it down to 75.83. The restart needs **7 stages**, with the operand
+latch between the file read and the execute:
+
+    F | IQ | D (decode + file read address) | R (file data + bypass latch)
+      | X (ALU) | M (address + memory) | W (writeback)
+
+That is the measured answer to P0b: not "the plan is fine", but "the plan needs one more
+stage, and it must be the one between the file and the ALU".

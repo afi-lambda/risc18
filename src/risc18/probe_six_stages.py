@@ -257,3 +257,93 @@ class ProbeXstageMulReg(ProbeXstage):
 
         m.d.sync += [self.o_val.eq(val), self.o_tgt.eq(tgt), self.o_eq.eq(a == b)]
         return m
+
+
+class ProbeXstageRF(wiring.Component):
+    """X with the *real* operand path: DPRAM register file + bypass + ALU + compare.
+
+    The review's P0b requirement: the stage that matters is not the bare adder, it is
+    read-operands-from-the-file, select the forward, add/multiply, compare, and form the
+    target -- all in one cycle. A 16x18 two-read one-write file maps to
+    TRELLIS_DPR16X4 (distributed RAM), so the read is address-to-data inside the cycle,
+    exactly as the shipping core builds it.
+    """
+
+    with_target = True            # False: PC-relative target is formed in D instead
+
+    def __init__(self):
+        super().__init__({
+            "clk": In(1),
+            "i_ra": In(4),
+            "i_rb": In(4),
+            "i_waddr": In(4),
+            "i_wdata": In(WIDTH),
+            "i_we": In(1),
+            "i_fwd": In(2),          # 0 none, 1 forward to a, 2 forward to b
+            "i_imm": In(16),
+            "i_op": In(4),
+            "o_val": Out(WIDTH),
+            "o_tgt": Out(16),
+            "o_eq": Out(1),
+        })
+        self.ports = [self.clk, self.i_ra, self.i_rb, self.i_waddr, self.i_wdata,
+                      self.i_we, self.i_fwd, self.i_imm, self.i_op,
+                      self.o_val, self.o_tgt, self.o_eq]
+
+    def elaborate(self, platform):
+        m = Module()
+        rf = Memory(width=WIDTH, depth=16,
+                    init=[(i * 7919 + 13) & MASK for i in range(16)])
+        m.submodules.rf = rf
+        ra = rf.read_port(domain="sync")
+        rb = rf.read_port(domain="sync")
+        wr = rf.write_port(domain="sync")
+
+        m.d.comb += [ra.addr.eq(self.i_ra), ra.en.eq(1),
+                     rb.addr.eq(self.i_rb), rb.en.eq(1),
+                     wr.addr.eq(self.i_waddr), wr.data.eq(self.i_wdata),
+                     wr.en.eq(self.i_we)]
+
+        a = Signal(signed(WIDTH))
+        b = Signal(signed(WIDTH))
+        with m.Switch(self.i_fwd):
+            with m.Case(0):
+                m.d.comb += [a.eq(ra.data), b.eq(rb.data)]
+            with m.Case(1):
+                m.d.comb += [a.eq(self.i_wdata), b.eq(rb.data)]
+            with m.Case(2):
+                m.d.comb += [a.eq(ra.data), b.eq(self.i_wdata)]
+            with m.Default():
+                m.d.comb += [a.eq(self.i_wdata), b.eq(self.i_wdata)]
+
+        add = Signal(signed(WIDTH))
+        mul = Signal(signed(2 * WIDTH))
+        m.d.comb += [add.eq(a + b), mul.eq(a * b)]
+
+        val = Signal(WIDTH)
+        with m.Switch(self.i_op):
+            with m.Case(0):
+                m.d.comb += val.eq(add)
+            with m.Case(1):
+                m.d.comb += val.eq(mul[:WIDTH])
+            with m.Case(2):
+                m.d.comb += val.eq(a & b)
+            with m.Case(3):
+                m.d.comb += val.eq(a | b)
+            with m.Default():
+                m.d.comb += val.eq((ra.data + self.i_imm)[:WIDTH])
+
+        tgt = Signal(16)
+        if self.with_target:
+            m.d.comb += tgt.eq((ra.data + self.i_imm)[:16])
+        else:
+            m.d.comb += tgt.eq(ra.data)
+        m.d.sync += [self.o_val.eq(val), self.o_tgt.eq(tgt),
+                     self.o_eq.eq(a == b)]
+        return m
+
+
+class ProbeXstageRFNoTgt(ProbeXstageRF):
+    """The plan's actual X: the target adder lives in D, so X is file+bypass+ALU+compare."""
+
+    with_target = False

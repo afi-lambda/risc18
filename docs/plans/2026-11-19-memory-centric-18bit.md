@@ -70,12 +70,19 @@ Signoff: **120 MHz at CPI <= 1.5 = 80 MIPS** (1.76x the 45.5 today). 100 MIPS ne
 (Section 6 of the review, and the arithmetic is mine to own: 120/1.5 = 80, not 100.)
 
 ```
-  F     IQ    D     X     M     W
-  |     |     |     |     |     |
- imem  imem  decode ALU  dmem  dmem
- addr  data  regfile branch addr  data
-       (+1)  addr    resolve read  write
+  F     IQ    D      R      X      M      W
+  |     |     |      |      |      |      |
+ imem  imem  decode file   ALU    mem    mem
+ addr  data  +file  data   +cmp   addr   data
+             addr   +bypass             write
 ```
+
+**Seven stages, not six** (P0b measurement, `docs/metrics/NOTES.md`): the realistic X
+stage -- register-file read, bypass select, ALU, compare in one cycle -- measures
+83.4-83.8 MHz at a 120 MHz constraint, identical across seeds, and moving the target
+adder to D changes it by 0.4 MHz. The cost is the operand path (5.4 ns logic + 6.5 ns
+routing), not the target adder. With operands already latched the same ALU cone is
+181.79 MHz, so the fix is a register between the file data and the execute: stage R.
 
 - **Harvard, both sides EBR, latencies declared in the ISA-visible timing model:**
   imem 2 cycles (F, IQ), dmem 2 cycles (M, W). Loads write back from W, so a
@@ -167,6 +174,14 @@ P0b — prove the timing and the cycle contract *together* (a bare read probe ca
   MHz slack) and still issues ~1/cycle. Gate: slice closes 120 MHz worst seed *and* the
   cycle counts match the contract on a trace.
 
+  **Result: gate NOT MET, and it changed the architecture to seven stages.** Builds are
+  in `docs/metrics/NOTES.md`; the short form is `ProbeXstageRF` 83.38 / 83.43 MHz
+  (seeds 1/3, 12.0 ns = 5.4 logic + 6.6 routing) and `ProbeXstageRFNoTgt` 83.84 /
+  83.76 MHz. Moving the target adder to D buys 0.4 MHz, so the operand path — file read
+  + bypass select in the execute cycle — is the cost, and with operands latched the same
+  ALU cone is 181.79 MHz. The contract therefore gains stage **R** between the file and
+  the ALU (§3).
+
 P0c — settle model vs silicon on the 5.6 ns read arc, cheaply. Fixed EBR launch clock,
   a second same-frequency PLL output shifted in fine phase (1/8 VCO period = 0.21 ns at a
   600 MHz VCO) into the capture flop; run at 60 MHz, since the point is the
@@ -181,6 +196,14 @@ P1 — placement feasibility (1 session, flow only), in the review's order: real
   the X address drivers and response registers, then a loose selective region only if it
   beats the anchored-but-unconstrained build over seeds 1/2/3/7 at 120 MHz. Gate: worst
   seed >= 100 MHz and repeatable across seeds; a single good seed does not count.
+
+  **First arm measured: knob-level placement is worth ~5 MHz.** `Full6Top` seed 1 at a
+  120 MHz constraint: baseline 78.35 MHz, `--placer-heap-timingweight 50` -> **83.29**,
+  `200` -> 75.83. So the placer's own timing weight is not the 120 MHz lever. Note also
+  that nextpnr-ecp5's LPF supports `LOCATE`/`IOBUF`/`BLOCK` but **not** `REGION`, so a
+  real region constraint has to be expressed either as per-cell `LOCATE` lines or as a
+  `--pre-place` Python script calling `bindBel`, both fragile against yosys cell names.
+  That is the remaining P1 work, and it is a day, not an afternoon.
 
 P2 — ISA delta, not a new ISA: add only what the 6-stage timing model needs
   (explicit load latency in the docs, a branch-hint bit if P1 says mispredicts
@@ -197,6 +220,9 @@ P4 — routed and on the board: worst-seed fmax >= 120 MHz **and** >= 80 MIPS on
 ## 5. Stop conditions
 
 - P0 misses 150 MHz: the memory-centric premise is wrong; report, do not proceed.
+- P0b misses 120 MHz: **fired on 2026-11-19** at 83.4-83.8 MHz. The response is a
+  contract change, not a pass: stage R added (§3), and P0b must be re-run on the
+  seven-stage cone before P3. Do not build Core7 to the six-stage contract.
 - P1 misses 100 MHz: placement cannot buy the target; the honest fallback is to
   keep ~78 MHz and attack CPI, and that decision belongs to the user, not to a
   stage worker.
