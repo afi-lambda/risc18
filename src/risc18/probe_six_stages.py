@@ -347,3 +347,66 @@ class ProbeXstageRFNoTgt(ProbeXstageRF):
     """The plan's actual X: the target adder lives in D, so X is file+bypass+ALU+compare."""
 
     with_target = False
+
+
+class ProbeRstage(wiring.Component):
+    """The new R stage: register-file read plus the W->R bypass select, nothing else.
+
+    This is the stage the seven-stage contract adds. P0b showed the realistic X stage
+    (file read + bypass + ALU + compare) closes only at 83.4 MHz; R takes the first two
+    terms out of that cycle and leaves the ALU with latched operands.
+    """
+
+    with_fwd = True
+
+    def __init__(self):
+        super().__init__({
+            "clk": In(1),
+            "i_ra": In(4),
+            "i_rb": In(4),
+            "i_waddr": In(4),
+            "i_wdata": In(WIDTH),
+            "i_we": In(1),
+            "i_fwd": In(2),
+            "o_a": Out(WIDTH),
+            "o_b": Out(WIDTH),
+        })
+        self.ports = [self.clk, self.i_ra, self.i_rb, self.i_waddr, self.i_wdata,
+                      self.i_we, self.i_fwd, self.o_a, self.o_b]
+
+    def elaborate(self, platform):
+        m = Module()
+        rf = Memory(width=WIDTH, depth=16,
+                    init=[(i * 7919 + 13) & MASK for i in range(16)])
+        m.submodules.rf = rf
+        ra = rf.read_port(domain="sync")
+        rb = rf.read_port(domain="sync")
+        wr = rf.write_port(domain="sync")
+        m.d.comb += [ra.addr.eq(self.i_ra), ra.en.eq(1),
+                     rb.addr.eq(self.i_rb), rb.en.eq(1),
+                     wr.addr.eq(self.i_waddr), wr.data.eq(self.i_wdata),
+                     wr.en.eq(self.i_we)]
+
+        a = Signal(WIDTH)
+        b = Signal(WIDTH)
+        if self.with_fwd:
+            with m.Switch(self.i_fwd):
+                with m.Case(0):
+                    m.d.comb += [a.eq(ra.data), b.eq(rb.data)]
+                with m.Case(1):
+                    m.d.comb += [a.eq(self.i_wdata), b.eq(rb.data)]
+                with m.Case(2):
+                    m.d.comb += [a.eq(ra.data), b.eq(self.i_wdata)]
+                with m.Default():
+                    m.d.comb += [a.eq(self.i_wdata), b.eq(self.i_wdata)]
+        else:
+            m.d.comb += [a.eq(ra.data), b.eq(rb.data)]
+
+        m.d.sync += [self.o_a.eq(a), self.o_b.eq(b)]
+        return m
+
+
+class ProbeRstageNoFwd(ProbeRstage):
+    """R without the bypass mux: the cost of the forward alone."""
+
+    with_fwd = False
