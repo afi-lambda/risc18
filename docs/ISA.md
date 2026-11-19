@@ -322,7 +322,12 @@ reported either way.
 
 The PC-relative target is computed in **D** and registered (it needs PC and displacement,
 not forwarded operands). The compare runs in **X** on R-latched operands, and the
-decision is applied at the X/M edge. Recovery is 2 cycles; not-taken costs nothing.
+decision is applied at the X/M edge, so it reaches fetch two cycles later and a taken
+transfer kills **five** retire slots (measured on `Core7`: 5 slots for a taken branch,
+`JAL` and `JALR` alike, and 0 for not-taken). An earlier draft of this section said
+"recovery is 2 cycles", which conflates the two: 2 is the delay from the X compare to the
+fetch redirect, 5 is the number of in-flight words that delay destroys. Implementations
+must be held to the 5, not the 2.
 Prediction is static backward-taken until P1 measures a mispredict rate that justifies
 otherwise. No branch-hint bit is added to the encoding: the frozen v1 formats stay
 frozen, and a hint bit would be an ISA change for a policy that is not yet measured.

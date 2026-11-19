@@ -219,9 +219,28 @@ P3 — `Core7` written to the frozen ISA, simulation-first: golden model and the
   existing 317 tests must pass unchanged, plus new tests for the 2-cycle memory
   contract and the branch penalty. Gate: pytest 100 %.
 
+  **Result: SIM green, PnR RED — and the restart is stopped here.** `Core7` is on main
+  (`src/risc18/core7.py`): 355 tests pass, the retire trace equals `golden.Machine.trace`
+  and `Core` on every program, and the bubble table of ISA 7.2 is met exactly (ALU and
+  MUL free at distance 1 and 2, load-use one bubble at distance 1). But `Core7Top`
+  routes at 64.49 / 68.20 / 70.56 MHz (seeds 3/1/2) against the 120 MHz gate, and
+  `Core6Top` on the same flow is 77.92 MHz, so seven stages are 12 % *slower* than six
+  and both are slower than the five-stage core's 73.48 MHz at 45.5 MIPS. The measured
+  X path is 14.7 ns (4.4 logic + 10.3 routing) and ends in the data-EBR address: the
+  bypass network, the tag compares and the EBR address fan-out that no probe contained
+  are exactly the integration tax the review predicted. Dropping the M->X bypass and
+  paying a bubble buys only 75.58 MHz, so the bypass mux is not the whole story either.
+
+  Consequence for the program: stage-level probes at 120-150 MHz did not survive
+  integration, and the memory-centric restart as specified does not reach 120 MHz on
+  this flow. The remaining untested lever is placement (routing is 70-75 % of every
+  critical path at ~1.5 kLUT and `tools/synth.py` still emits only `FREQUENCY NET`
+  "clk"), and that decision belongs to the user.
+
 P4 — routed and on the board: worst-seed fmax >= 120 MHz **and** >= 80 MIPS on the same
   counted loop as the baseline (45.5 MIPS), then `hil_status` on hardware with the
-  measured MIPS on the line. Timing alone does not sign this off.
+  measured MIPS on the line. Timing alone does not sign this off. **Not reached: P3's
+  routed gate failed.**
 
 ## 5. Stop conditions
 

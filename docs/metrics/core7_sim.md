@@ -1,5 +1,12 @@
 # Core7 — simulation CPI and routed numbers
 
+**Gate verdict, controller's read of this file: SIM green, PnR RED.** The suite is
+355 passed including 38 new tests, and the retire trace matches `golden.Machine.trace`
+and `Core` on every program. But `Core7Top` routes at 64.49-70.56 MHz against the
+120 MHz gate, and `Core6Top` on the same flow is 77.92 MHz, so the seven-stage restart
+is *slower* than the core it was meant to replace. Merged as an instrument, not as a
+signoff: see section 5 and `docs/plans/2026-11-19-memory-centric-18bit.md`.
+
 `src/risc18/core7.py`, the seven-stage restart core of `docs/ISA.md` section 7
 (F · IQ · D · R · X · M · W). Everything below was measured on this worktree;
 nothing here is estimated. Commands are given with each table so a number can be
