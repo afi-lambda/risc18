@@ -269,3 +269,71 @@ Reset: the core must forward its synchronous active-high reset to the `sync`
 domain's `rst`. Unit instances (including `PCUnit` and `RegFile`) must be
 elaborated under that reset-bearing domain; only the synthesis measurement
 tops in `tops.py` use a reset-less domain, and they are not the core.
+
+## 7. Core7 (seven-stage restart) — contract
+
+`Core7` is a new core, not a change to `Core`. Encodings, machine state, the decoder
+port contract and the retire interface of section 6 are unchanged; the golden model and
+every existing test apply as they are. What differs is the timing contract, and this
+section is normative for it.
+
+### 7.1 Stages
+
+```
+F   PC register -> instruction EBR address
+IQ  instruction EBR output -> FQ register -> decode fields
+D   decode fields registered; register-file read address presented
+R   register-file data captured; W->R bypass select; operands registered
+X   ALU (add/sub/logic/shift), compare, multiply issue; effective address
+M   data EBR address presented (store data too); load launched
+W   register writeback; registered load word
+```
+
+The memories are EBR with **latency 2 by edge contract**: X presents the data address so
+the block samples it at the X/M edge, its output is captured at the M/W edge, and W
+exposes the registered word. The 5.6 ns DP16KD clock-to-out therefore sits alone in a
+cycle. Measured: read half 6.7-6.9 ns (145.10-150.08 MHz), R stage 3.8 ns (263.44 MHz),
+X with the product registered 7.7 ns (129.85 MHz), worst stage X.
+
+### 7.2 Register writes and bypass
+
+A register write commits at the closing edge of W, and consumers latch operands in R.
+Because the pipeline is seven deep, a producer and its consumer are further apart in
+cycles than in section 6, and that *reduces* the stall count rather than raising it:
+
+| dependency | bubbles | mechanism |
+|---|---:|---|
+| ALU or MUL -> consumer at distance 1 | 0 | M->X input bypass: the producer's registered result exists in M while the consumer executes in X |
+| ALU or MUL -> consumer at distance >= 2 | 0 | X->R bypass latched at the R edge |
+| load -> consumer at distance 1 | 1 | the word is registered only at the end of the load's M, i.e. one cycle after the consumer's X opens |
+| load -> consumer at distance >= 2 | 0 | the consumer's X arrives after the word is in W |
+
+So the load-use rule stays at exactly one bubble, as in section 6, and every ALU/MUL
+dependency is free at any distance.
+
+The cost of the first row is timing, not cycles: the M->X bypass adds a select at the
+ALU input, which is not in any probe. `ProbeXstageMulReg` measures the ALU with an
+output select at 7.7 ns against an 8.33 ns budget, so the input mux spends most of the
+remaining 0.6 ns. If the integrated X stage misses 120 MHz because of it, the fallback is
+**one bubble at distance 1** rather than a wider pipeline -- measured, not assumed, and
+reported either way.
+
+### 7.3 Control transfer
+
+The PC-relative target is computed in **D** and registered (it needs PC and displacement,
+not forwarded operands). The compare runs in **X** on R-latched operands, and the
+decision is applied at the X/M edge. Recovery is 2 cycles; not-taken costs nothing.
+Prediction is static backward-taken until P1 measures a mispredict rate that justifies
+otherwise. No branch-hint bit is added to the encoding: the frozen v1 formats stay
+frozen, and a hint bit would be an ISA change for a policy that is not yet measured.
+
+### 7.4 Constraints on the implementation
+
+- Do not widen the pipeline further to hide a stage. If a stage misses 8.33 ns, report
+  it, do not add a stage.
+- Do not move the register-file read into X, and do not read the EBR in R: both were
+  measured (83.4 MHz and 111.53 MHz respectively).
+- Do not rely on reading just-written distributed RAM; the write-through and bypass are
+  explicit selects.
+- `o_retire` semantics are unchanged: one pulse per instruction in program order, with
+  `o_retire_we` matching `golden.Machine.trace`.
