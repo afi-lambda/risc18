@@ -449,3 +449,82 @@ and trivial placement it measures far faster than the same cone does inside the 
 The honest budget for the post-cut D stage is the committed 13.5 ns chain minus the
 5.6 ns EBR read, i.e. ~7.9 ns (~126 MHz), which is marginal at 120 and the reason D
 should be split from decode if the clock target is 150.
+
+## Probe: does `EBR -> ALU -> EBR` fit when split over two cycles?
+
+`src/risc18/probe_mem_pipe.py`, `--freq 150`, seeds 1/2/3/7, post-route. The chain
+that measures 9.0 ns in one clock (`ProbeW`) is cut at a register:
+
+    cycle N:   EBR read -> q_r (fabric register)
+    cycle N+1: q_r + op -> add -> EBR write address and data
+
+| seed | period | logic | routing | fmax | at 150 MHz |
+|---|---:|---:|---:|---:|---|
+| 1 | 6.7 ns | 5.6 | 1.1 | **150.08 MHz** | met |
+| 2 | 6.7 ns | 5.6 | 1.1 | 149.93 MHz | missed by 0.07 |
+| 3 | 6.90 ns | 5.6 | 1.3 | 145.18 MHz | missed |
+| 7 | 6.89 ns | 5.6 | 1.3 | **145.10 MHz** | missed |
+
+Worst seed **145.10 MHz**; the logic term is the DP16KD clock-to-out, identical in
+all four (5.6 ns) because it is a hard block, and the whole seed spread is 1.1 vs
+1.3 ns of routing (5.0 MHz). The reported path is the read half
+(`src.0.0.DOA2 -> q_r`); nextpnr reports the maximum, so the write half
+(`q_r -> add -> dst` setup) is shorter in every seed.
+
+Against the two gates that matter:
+
+* 120 MHz: **met with 21 % margin**, worst seed 145.10.
+* 150 MHz: **missed by 3.3 %** at the worst seed. The floor is the block, not the
+  design: 5.6 ns is 84 % of an 8.33 ns period and cannot be shrunk without
+  `REGMODE=OUTREG` on the primitive, which this flow does not infer.
+
+Caveat on the routing figure: this is a bare probe with one consumer, so 1.1-1.3 ns
+is a lower bound. In a populated core the same stage also feeds the fetch register
+and decode, so budget the read stage at 6.7-7.5 ns (133-150 MHz) rather than 145 as
+a committed number. 120 MHz remains the honest target, 150 the stretch.
+
+### The operand mux, isolated
+
+`Probe2CMux` is the same chain with the second operand behind a 16:1 register-read
+mux: **9.4 ns = 2.3 logic + 7.1 routing = 106.51 MHz**, below the gate. The routed
+path is `r_sel` FF -> LUT (2.5 ns net) -> LUT (2.0 ns) -> LUT (0.9 ns) -> LUT
+(0.9 ns): a four-level LUT tree across four tiles. A wide operand mux is distance,
+not logic -- the same mechanism that put 9.3-10.5 ns of routing on the six-stage
+`dx_b` cone. Operand selection must come from distributed RAM (`DPR16X4`, ~1.9 ns
+address-to-out) or from narrow, clustered muxes, never from a 16:1 flop mux in the
+ALU cycle.
+
+## Is the EBR's own output register (`REGMODE=OUTREG`) available to us? No, and it is
+
+not measurable in this flow.
+
+Answer to the design question first: **the design does not use it.** Yosys hardcodes
+`REGMODE_A("NOREG")` / `REGMODE_B("NOREG")` in `ecp5/brams_map.v` (lines 120-121 and
+360-361), so every memory inferred from Amaranth comes out with the block's output
+register bypassed. What we call "registered read" is a *fabric* flop after the block:
+
+| segment | time | source |
+|---|---:|---|
+| address sampled -> DOA (block clock-to-out) | 5.6 ns | `ProbeRd`, `Probe2C`, `ProbeW` |
+| DOA -> fabric FF (whole read stage) | 6.7 ns / 149.97 MHz | `ProbeRd` |
+| same, seeds 1/2/3/7 | 6.7-6.9 ns / 145.10-150.08 MHz | `Probe2C` |
+| read -> add -> write, **one** clock (no extra register) | 9.0 ns / 111.53 MHz | `ProbeW` |
+
+Two attempts to obtain an OUTREG number, both negative:
+
+1. **Hand-instantiated `DP16KD`** (`src/risc18/probe_ebr_outreg.py`, REGMODE_A set to
+   NOREG and to OUTREG): nextpnr prints `No interior timing paths found in design` in
+   both cases -- it has no timing arcs for a raw instance of the cell, so the read path
+   is not modelled and no fmax is produced.
+2. **Post-synthesis netlist patch**: flipping `REGMODE_A` to `OUTREG` in a known-good
+   `top.json` and re-running nextpnr gives 346-442 MHz with the EBR absent from the
+   timing log entirely (`grep -c mem.0.0 pnr.log` = 0). That is a missing-model
+   artefact; quoting it as a speedup would be dishonest.
+
+Consequence for the architecture: the two-cycle contract is the right one *because*
+the flow gives NOREG -- the 5.6 ns is paid alone in the read cycle. OUTREG would only
+matter for a single-cycle `EBR -> ALU -> EBR`, and reaching it is a toolchain project
+(a yosys change to emit the parameter, plus a timing model, plus hardware validation),
+not an RTL flag. Parked. Note that both modes present data in the cycle after the
+address is sampled, so OUTREG would cost no extra latency if it ever lands: it moves a
+register from fabric into the block, it does not add a pipeline stage.

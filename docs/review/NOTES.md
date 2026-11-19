@@ -174,3 +174,149 @@ reasoning setting is not demonstrable.
   is registered before the result-select tree.
 - It asked for the same thing the previous review did: board timing first. Nothing
   in this repo has run on hardware, so every projection here is static.
+
+## Review: restart architecture (`prompt_restart_arch.md` -> `advice_restart_arch.md`)
+
+openai/gpt-6.2-sol, 2026-11-19, effort high, **reasoning_tokens 3448** (unlike the
+earlier recipe/deeper-pipeline runs which returned 0), 2432 prompt / 5719 completion,
+$0.0633, 57.7 s. Effort was applied this time; the earlier caveat does not carry over.
+
+### (a) What the brief got wrong
+
+1. **Throughput arithmetic.** The brief said 120 MHz at CPI 1.5 is ~100 MIPS. It is 80
+   (120/1.5). 100 MIPS needs 150 MHz at CPI 1.5 or 120 MHz at CPI 1.2. Settled by
+   arithmetic; the plan doc's signoff line and P4 were corrected to 80 MIPS.
+2. **"2 DP16KD per memory".** One DP16KD is 1024x18, and the current core uses **one per
+   memory, two total** (`m11_full_ram`, `m12_full6_s7`: `DP16KD 2/56`). Settled by the
+   routed utilisation tables.
+3. **Framing the 145-150 MHz probe as a ceiling.** It is a read-stage result for this
+   mapping and placement, not a silicon limit. The block floor (5.6 ns) is real; the rest
+   is place-and-route-dependent.
+
+### (b) What the answer could not know, and what we should not accept uncritically
+
+- It ranks "constrain the actual board pins first". The repo flow has **no** pin
+  constraints at all today and the board loads and runs, so this is a correctness-and-
+  reproducibility argument, not a timing one; it is cheap, so it moves into P1 anyway.
+- Its reset advice (release into the core clock domain, local valid gates the store) is
+  already the `Full6Top` shape; the 8.18-9.94 ns reset path is a `Core6Top`-only artefact.
+- It treats the 317-test suite as a correctness net and asks for cycle checks on top.
+  Agreed, and that is the P0b slice: a bare read probe cannot prove a bypassed core closes.
+
+### (c) Levers: executed, parked, killed
+
+- **Killed: single-cycle EBR -> ALU -> EBR at 120 MHz.** 9.0 ns for an add alone, 5.6 ns
+  of it the DP16KD clock-to-out. Also killed: `REGMODE=OUTREG` as the foundation (kept as
+  a later experiment on one hot instruction).
+- **Killed: blanket first-commit region constraint.** Replaced with endpoints-first
+  (pins/PLL/global clock, anchor the data EBR, then a loose selective region tested
+  against an unconstrained build over the same seeds). Its named failure mode — a legal
+  placement with worse routes — is the reason a single good seed is not acceptance.
+- **Killed: compare in D.** The review's argument is sound and beats mine: D already
+  carries decode, distributed-RAM read and bypass select, and the freshest operand may
+  still be produced in X, so an ALU-to-branch dependency would need a long X-to-D path or
+  a stall. Replaced with: compare stays in X, **PC-relative target moves to D** (it needs
+  PC + displacement, not forwarded operands), register-indirect target stays in X.
+- **Parked: the 150 MHz stretch.** Block-limited at 145.10 MHz worst seed on a bare probe;
+  120 MHz is the committed signoff.
+- **Adopted: W-to-X bypass with a one-bubble adjacent load-use**, store payload forwarded
+  to the write-sampling edge with an explicit ordering decision, and the branch budget
+  `b*t <= (0.5 - s)/2` as the thing to measure rather than assume.
+
+## Review round 2: the 5.6 ns EBR read cost (`prompt_ebr_round2.md`)
+
+openai/gpt-6.2-sol, effort high requested. **`reasoning_tokens: 0` this run** (13.9 s,
+1272 prompt / 1504 completion, $0.0182) — the endpoint accepted the flag and did not
+honour it, so this is a fast completion, not a deliberation. Round 1 on the same model
+returned 3448 reasoning tokens, so the behaviour is inconsistent run to run, not a
+property of the model. Treat this answer as usable but not as evidence about what high
+effort would have found.
+
+What it settled, and where it corrected me:
+
+1. **5.6 ns is plausible** for an unregistered (NOREG) read on a -6 ECP5, and it has no
+   verified vendor number to replace it with. My "the datasheet may be materially
+   better" hypothesis is unsupported as stated. The check that would move it is a
+   **Diamond post-route report** for the same device, speed grade, 1024x18, NOREG mode,
+   reading the launch arc separately from routing and destination setup.
+2. **My 6.4 ns "if it were 3 ns" arithmetic is a sensitivity estimate, not a budget.**
+   9.0 - 5.6 + 3.0 assumes the 3.0 replaces exactly that arc and nothing else; the 1.9 ns
+   net already in the path leaves only 1.5 ns for the carry chain, the rest of the
+   routing and setup. Correct: use the full path report, never a second sum of
+   components. (Also corrected: "21 % above 120 MHz" is 1.44 ns of slack, not a
+   frequency-only statement.)
+3. **The OUTREG experiments prove nothing about OUTREG's speed**, only that nextpnr has
+   no model for it. Already recorded above; this is the confirmation.
+
+Its experiment for model-vs-silicon, if we want it: sweep the *functional* read path
+(complementary EBR contents, alternating addresses so the outputs toggle every read),
+same capture flop and route at every point, sticky error flag read over UART in a stable
+domain, a checker control that bypasses the EBR, and legal PLL steps bracketed by
+repeats. Near 150 MHz one 1 MHz step is ~44 ps of period — nominal, not accuracy. The
+result is a pass/fail threshold for clock-to-DO + route + capture, not a tens-of-ps
+measurement, and its failure mode is finding the launch/PLL/checker/write limit instead
+of the read path. It explicitly rejects a ring oscillator or delayed replica as more
+calibration for less decision value.
+
+Decision criterion it gave for single-cycle vs split: close the **integrated** core
+across representative placements, then compare CPI and resources; single-cycle at a real
+6.4 ns leaves ~1.9 ns for integration at 120 MHz (plausible) and ~0.27 ns at 150 MHz
+(not plausible). It also states the split is not yet a robust 150 MHz answer in our
+seeds — which matches 145.10 MHz worst.
+
+Ranked non-toolchain options: distributed RAM for a small critical file (combinational
+read, costs LUTs and mux levels, replicate banks for independent read addresses and
+write them all) > hot operands kept in fabric registers with bulk in EBR (helps hits
+only) > 36-bit packing (no independent read address, does not remove the read stage) >
+two-bank interleave (bandwidth, not latency; return mux can make it worse) > narrowing
+(does not lower clock-to-DO).
+
+New failure mode, and it is a good one: **paying for the second stage without getting
+one operation per cycle.** A dependent instruction can launch its EBR read before the
+previous writeback is visible; stalls then push dependent code to one op per two cycles,
+while forwarding puts tag compares, priority muxes and writeback fanout on paths the
+probe never contained. A late stall or redirect can also leave a stale read in flight
+unless valid and destination travel with it. The test that settles it is a back-to-back
+dependent instruction stream, not a static timing report.
+
+### Same brief, re-issued: what high effort actually bought
+
+The first run returned `reasoning_tokens: 0` in 13.9 s. The identical brief re-sent
+returned **4520 reasoning tokens, 6246 completion, 123.9 s, $0.0656** — so the earlier
+"effort not demonstrable" was endpoint flakiness, and the fast answer was a fast
+completion. Same verdict on every headline question, better content in four places:
+
+1. **Mechanism, not just plausibility.** NOREG bypasses the output register, not the
+   memory-array read — the modelled clock-to-output arc still includes getting the
+   addressed word to DOA, so it is not comparable to a fabric flop's clock-to-Q. That is
+   *why* 5.6 ns is a believable budget rather than a suspicious one.
+2. **A cheaper and sharper experiment than the clock sweep.** Fixed EBR launch clock,
+   a second same-frequency PLL output shifted by fine phase into the capture flop; run
+   it at 60 MHz because the point is the launch-to-capture interval, not running near
+   failure. Fine phase is 1/8 VCO period = **0.21 ns at a 600 MHz VCO**. Alternate
+   complementary words, count old-word and new-word captures at each phase in both
+   transition directions, keep placement and routing fixed, and run a nearby fabric-flop
+   reference with the same clock pair to expose clock insertion offset. It measures
+   EBR clock-to-DO + data route + capture setup as a **transition band**, not a
+   threshold, and can see a ~2.6 ns discrepancy if the offsets are controlled. Both
+   runs reject a ring oscillator or self-timed counter.
+3. **A genuinely new ranked option — issue the EBR read earlier when the address is
+   already known.** It moves the read stage instead of speeding it up; costs address,
+   tag and valid state, possibly a buffer, and a wasted read slot on redirect; applies
+   to predictable fetches and table lookups, not to a late data-dependent address. The
+   retry ranks it second, between distributed RAM and 36-bit packing, and drops the
+   fast run's "hot operands in fabric registers".
+4. **Numbers where the fast run had adjectives.** Distributed RAM: about one storage
+   LUT per bit per 16-deep bank per read copy, so a 16x18 two-read one-write file is
+   ~36 storage LUTs before overhead, writes broadcast to both copies, and replication
+   does not buy extra write ports. 36-bit mode is 512x36 and pseudo-dual-port, not two
+   independently addressed read ports; a half-word update can cost read-modify-write.
+
+Both runs agree on the criterion (single-cycle only if the *integrated* core closes and
+the shorter latency removes real stalls; a room-temperature measurement never buys
+worst-case slack) and on the failure mode (a dependent stream that turns two-cycle
+latency into a two-cycle issue interval, with forwarding on the EBR-to-split-flop path
+spending the 1.44 ns of 120 MHz slack). The retry adds the hazard specifics: a consumer
+reading a destination whose write is still in flight, including read and write
+coinciding, and the requirement to route a short dependent ALU chain that exercises
+same-address read/write before freezing the contract.
