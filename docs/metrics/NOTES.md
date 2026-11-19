@@ -564,3 +564,38 @@ latch between the file read and the execute:
 
 That is the measured answer to P0b: not "the plan is fine", but "the plan needs one more
 stage, and it must be the one between the file and the ALU".
+
+## P0b re-run on the seven-stage contract: every stage now fits 120 MHz
+
+`ProbeRstage` / `ProbeRstageNoFwd` (`src/risc18/probe_six_stages.py`), 120 MHz
+constraint, seeds 1/3, post-route. R is the stage the seven-stage contract adds: the
+16x18 two-read one-write distributed-RAM file, plus the W->R bypass select, nothing else.
+
+| stage | probe | seeds 1 / 3 | period | logic | routing | at 120 MHz |
+|---|---|---|---:|---:|---:|---|
+| R: file read + bypass | `ProbeRstage` | 264.34 / 263.44 MHz | 3.8 ns | 1.0 | 2.8 | met, 55 % margin |
+| R: file read only | `ProbeRstageNoFwd` | 343.05 / 338.98 MHz | 2.9 ns | 0.8 | 2.2 | met |
+
+The bypass mux costs 0.6 ns. Both seeds agree within 1 MHz, so R is not a risk.
+
+Against the 8.33 ns budget of 120 MHz, the whole seven-stage contract now has a measured
+number for every stage:
+
+| stage | measured | source |
+|---|---:|---|
+| F (imem address in) | 6.7 ns / 149.93 MHz | `ProbeFetchIn` |
+| IQ (imem read out) | 6.7-6.9 ns / 145.10-150.08 MHz | `Probe2C` read half |
+| D (decode + file address) | <= 2.6 ns / 307-380 MHz (shape check) | `ProbeDstage` |
+| R (file data + bypass) | **3.8 ns / 263.44 MHz** | `ProbeRstage`, this run |
+| X (ALU + compare, mul registered) | 7.7 ns / 129.85 MHz | `ProbeXstageMulReg` |
+| M (address + memory launch) | part of the 3.8-6.9 above | - |
+| W (writeback) | shorter than its read half | `Probe2C` |
+
+**Worst stage: X at 7.7 ns (129.85 MHz), 8 % margin at 120 MHz.** The 83.4 MHz X-stage
+result was the six-stage mistake, not a property of the machine: with R in place the
+file read leaves the execute cycle, and the execute cycle is 5.5 ns without a multiply
+and 7.7 ns with the product registered.
+
+So the contract is proven at the stage level and P3 (Core7 RTL) is unblocked. The risks
+that remain are integration, not any single cone: bypass fan-out across R and X, the
+hazard logic the review named, and placement once the whole core is populated.

@@ -174,7 +174,13 @@ P0b — prove the timing and the cycle contract *together* (a bare read probe ca
   MHz slack) and still issues ~1/cycle. Gate: slice closes 120 MHz worst seed *and* the
   cycle counts match the contract on a trace.
 
-  **Result: gate NOT MET, and it changed the architecture to seven stages.** Builds are
+  **Re-run on the seven-stage cone: every stage fits.** `ProbeRstage` (file read +
+  bypass -> FF) is 3.8 ns / 264.34 / 263.44 MHz, and without the bypass mux 2.9 ns /
+  343.05 / 338.98 MHz. With X at 7.7 ns (`ProbeXstageMulReg`, mul registered) the worst
+  stage is X, 8 % inside the 120 MHz budget. P3 is unblocked; the remaining risk is
+  integration (bypass fan-out, hazard logic, placement), not any single cone.
+
+  **First result (six-stage X) was: gate NOT MET, and it changed the architecture.**
   in `docs/metrics/NOTES.md`; the short form is `ProbeXstageRF` 83.38 / 83.43 MHz
   (seeds 1/3, 12.0 ns = 5.4 logic + 6.6 routing) and `ProbeXstageRFNoTgt` 83.84 /
   83.76 MHz. Moving the target adder to D buys 0.4 MHz, so the operand path — file read
